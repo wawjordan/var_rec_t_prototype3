@@ -520,15 +520,48 @@ contains
     call get_number_of_faces(size(n_cells),n_cells,junk,n_faces)
   end function num_boundary_faces
 
-  ! pure subroutine enumerate_faces(n_dim,n_cells,faces, n_interior)
-  !   integer,                   intent(in) :: n_dim
+  pure subroutine enumerate_faces(n_dim,n_cells,faces)
+    integer,                   intent(in) :: n_dim
+    integer, dimension(n_dim), intent(in) :: n_cells
+    integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
+    integer, dimension(n_dim) :: cell_idx, face_sz, face_idx
+    integer :: cnt, d, n
+    do n = 1,product(n_cells)
+      cell_idx = global2local(n,n_cells)
+      cnt = 0
+      do d = 1,n_dim
+        face_sz = n_cells
+        face_sz(d) = face_sz(d) + 1
+
+        cnt = cnt + 1
+        face_idx = cell_idx + 1
+        face_idx(d) = face_idx(d) - 1 ! lo face
+        faces(cnt,n) = local2global(face_idx,face_sz)
+
+        cnt = cnt + 1
+        face_idx = cell_idx
+        face_idx(d) = face_idx(d) + 1 ! hi face
+        faces(cnt,n) = local2global(face_idx,face_sz)
+      end do
+    end do
+  end subroutine enumerate_faces
+
+  ! pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,faces_idxs)
+  !   integer, intent(in) :: n_dim
   !   integer, dimension(n_dim), intent(in) :: n_cells
-  !   integer, dimension(2*n_dim,product(n_cells)) :: faces
-  !   integer, dimension(product(n_cells)) :: n_interior
+  !   integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
+  !   integer, dimension(n_dim), intent(in) :: cell_idx
+  !   integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
 
-    
-  ! end subroutine enumerate_faces
+  !   integer :: cnt, n, cell_idx_linear
+  !   cell_idx_linear = local2global(cell_idx,n_cells)
+  !   cnt = 0
+  !   do n = 1,n_dim
+  !     cnt = cnt + 1
+  !     face_idxs(:,cnt) = global2local()
 
+
+  ! end subroutine fetch_faces
 end module index_conversion
 
 module reshape_array
