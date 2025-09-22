@@ -302,7 +302,7 @@ module index_conversion
   public :: in_bound, cell_face_nbors
   public :: get_face_idx_from_id
   public :: get_reshape_indices
-  public :: get_number_of_faces
+  public :: get_number_of_faces, enumerate_faces, fetch_faces
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -546,22 +546,26 @@ contains
     end do
   end subroutine enumerate_faces
 
-  ! pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,faces_idxs)
-  !   integer, intent(in) :: n_dim
-  !   integer, dimension(n_dim), intent(in) :: n_cells
-  !   integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
-  !   integer, dimension(n_dim), intent(in) :: cell_idx
-  !   integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
+  pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
+    integer, intent(in) :: n_dim
+    integer, dimension(n_dim), intent(in) :: n_cells
+    integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
+    integer, dimension(n_dim), intent(in) :: cell_idx
+    integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
+    integer, dimension(n_dim) :: face_sz
 
-  !   integer :: cnt, n, cell_idx_linear
-  !   cell_idx_linear = local2global(cell_idx,n_cells)
-  !   cnt = 0
-  !   do n = 1,n_dim
-  !     cnt = cnt + 1
-  !     face_idxs(:,cnt) = global2local()
-
-
-  ! end subroutine fetch_faces
+    integer :: cnt, dir, n, cell_idx_linear
+    cell_idx_linear = local2global(cell_idx,n_cells)
+    cnt = 0
+    do n = 1,2*n_dim
+      cnt = cnt + 1
+      dir = (n-1)/2 + 1 ! direction
+      face_idxs(1,cnt) = dir
+      face_sz = n_cells
+      face_sz(dir) = face_sz(dir) + 1
+      face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
+    end do
+  end subroutine fetch_faces
 end module index_conversion
 
 module reshape_array
@@ -669,7 +673,16 @@ module math
   public :: LUdecomp, LUsolve, mat_inv
   public :: LegendrePolynomialAndDerivative, LegendreGaussNodesAndWeights
   public :: maximal_diameter, maximal_extents
+  public :: rand_int_in_range
 contains
+
+  impure elemental function rand_int_in_range(lo,hi) result(num)
+    integer, intent(in) :: lo, hi
+    integer             :: num
+    real(dp) :: harvest
+    call random_number(harvest)
+    num = nint( harvest*real(hi-lo,dp) + real(lo,dp) )
+  end function rand_int_in_range
 
   pure function cross_product( vec1, vec2 )
     real(dp), dimension(3), intent(in) :: vec1, vec2
@@ -2662,19 +2675,356 @@ contains
 
 end module test_problem
 
-program main
-  use index_conversion, only : get_number_of_faces
+module all_together
+  use set_precision, only : dp
+  use set_constants, only : zero, one
   implicit none
+contains
+  pure subroutine evaluate_monomial(n_dim,e,x,val,coef)
+    integer,                    intent(in)  :: n_dim
+    integer,  dimension(n_dim), intent(in)  :: e
+    real(dp), dimension(n_dim), intent(in)  :: x
+    real(dp),                   intent(out) :: val
+    integer,                    intent(out) :: coef
+    integer :: d, i
+    val  = one
+    coef = 1
+    do d = 1,n_dim
+      do i = e(d),1,-1
+        val  = val * x(d)
+        coef = coef * i
+      end do
+    end do
+  end subroutine evaluate_monomial
+
+  pure subroutine evaluate_monomial_derivative(n_dim,e,o,x,dval,dcoef,coef)
+    integer,                    intent(in)  :: n_dim
+    integer,  dimension(n_dim), intent(in)  :: e, o
+    real(dp), dimension(n_dim), intent(in)  :: x
+    real(dp),                   intent(out) :: dval
+    integer,                    intent(out) :: dcoef, coef
+    integer :: d, i
+    dcoef = 1
+    coef  = 1
+    dval  = zero
+    if ( any( e-o < 0 ) ) return
+    dval  = one
+    do d = 1,n_dim
+      do i = e(d),e(d)-o(d)+1,-1
+        dcoef = dcoef * i
+      end do
+      do i = e(d)-o(d),1,-1
+        dval  = dval * x(d)
+        coef = coef * i
+      end do
+    end do
+  end subroutine evaluate_monomial_derivative
+
+  pure function transform_points(n_dim,n_pts,pts,x_ref,h_ref) result(t_pts)
+    integer,                          intent(in) :: n_dim, n_pts
+    real(dp), dimension(n_dim,n_pts), intent(in) :: pts
+    real(dp), dimension(n_dim),       intent(in) :: x_ref, h_ref
+    real(dp), dimension(n_dim,n_pts)             :: t_pts
+    integer :: n
+    do n = 1,n_pts
+      t_pts(:,n) = ( pts(:,n) - x_ref ) / h_ref
+    end do
+  end function transform_points
+
+  pure function compute_grid_moments(n_dim,n_term,n_quad,exponents,t_quad_pts,quad_wts) result(moments)
+    integer,                           intent(in) :: n_dim, n_term, n_quad
+    integer,  dimension(n_dim,n_term), intent(in) :: exponents
+    real(dp), dimension(n_dim,n_quad), intent(in) :: t_quad_pts
+    real(dp), dimension(n_quad),       intent(in) :: quad_wts
+    real(dp), dimension(n_term)                   :: moments
+    real(dp), dimension(n_dim)       :: tmp_val
+    integer :: m, n, coef
+    do m = 1,n_term
+      do n = 1,n_quad
+        call evaluate_monomial(n_dim,exponents(:,m),t_quad_pts(:,n),tmp_val,coef)
+        moments(m) = moments(m) + tmp_val * quad_wts(n)
+      end do
+    end do
+    moments = moments / sum(quad_wts)
+  end function compute_grid_moments
+
+  pure function evaluate_basis(n_dim,n_term,exponents,moments,t_point,term) result(B)
+    integer,                           intent(in) :: n_dim, n_term
+    integer,  dimension(n_dim,n_term), intent(in) :: exponents
+    real(dp), dimension(n_term),       intent(in) :: moments
+    real(dp), dimension(n_dim),        intent(in) :: t_point
+    integer,                           intent(in) :: term
+    real(dp)                                      :: B
+    integer :: coef
+    B = one
+    if (term == 1) return
+    call evaluate_monomial(n_dim,exponents(:,term),t_point,B,coef)
+    B = B - moments(term)
+  end function evaluate_basis
+
+  pure function get_length_scale( n_dim, order, scale ) result(L)
+    integer,                    intent(in) :: n_dim
+    integer,  dimension(n_dim), intent(in) :: order
+    real(dp), dimension(n_dim), intent(in) :: scale
+    real(dp)                               :: L
+    integer :: n, d, den
+    L   = one
+    den = 1
+    do d = 1,n_dim
+      do n = order(d),1,-1
+        L   = L * scale(d)
+        den = den * n
+      end do
+    end do
+    L = L / real(den,dp)
+  end function get_length_scale
+
+  pure function evaluate_basis_derivative(n_dim,n_term,exponents,moments,t_point,h_ref,term,order_term) result(dB)
+    integer,                           intent(in) :: n_dim, n_term
+    integer,  dimension(n_dim,n_term), intent(in) :: exponents
+    real(dp), dimension(n_term),       intent(in) :: moments
+    real(dp), dimension(n_dim),        intent(in) :: t_point, h_ref
+    integer,                           intent(in) :: term, order_term
+    real(dp)                                      :: dB
+    integer :: coef, dcoef
+    integer, dimension(3) :: e, o
+    if (all(order==0)) then
+      dB =  evaluate_basis(n_dim,n_term,exponents,moments,t_point,term)
+    elseif(term==1)
+      dB = 0
+    else
+      e = exponents(:,term)
+      o = exponents(:,order_term)
+      call evaluate_monomial_derivative(n_dim,e,o,t_point,dB,dcoef,coef)
+      dB = dB * real(dcoef,dp) / product( h_ref**o )
+    end if
+  end function evaluate_basis_derivative
+
+
+  pure function evaluate_basis_derivatives(n_dim,n_term,exponents,moments,t_point,h_ref,term) result(dB)
+    integer,                           intent(in) :: n_dim, n_term
+    integer,  dimension(n_dim,n_term), intent(in) :: exponents
+    real(dp), dimension(n_term),       intent(in) :: moments
+    real(dp), dimension(n_dim),        intent(in) :: t_point, h_ref
+    integer,                           intent(in) :: term
+    real(dp), dimension(n_term)                   :: dB
+    dB = zero
+    do n = 1,term
+      dB(n) = evaluate_basis_derivative(n_dim,n_terms,exponents,moments,t_point,h_ref,term,n)
+    end do
+  end function evaluate_basis_derivatives
+
+  pure function get_derivative_scaling( n_dim, n_term, exponents, scale ) result( derivative_scale )
+    integer,                           intent(in) :: n_dim, n_term
+    integer,  dimension(n_dim,n_term), intent(in) :: exponents
+    real(dp), dimension(n_dim),        intent(in) :: scale
+    real(dp), dimension(n_term)                   :: derivative_scale
+    integer :: n
+    do n = 1,n_term
+      derivative_scale(n) = get_length_scale( n_dim, exponents(:,n), scale )
+    end do
+  end function get_derivative_scaling
+
+  pure subroutine get_nbor_contribution_matrices( n_dim, term_start, term_end, n_quad, exponents,             &
+                                    quad_pts, quad_wts,                           &
+                                    moments_i, x_ref_i, h_ref_i,           &
+                                    moments_j, x_ref_j, h_ref_j,         &
+                                    A, B, D, C )
+    integer, intent(in) :: n_dim, term_start, term_end, n_quad
+    integer,  dimension(n_dim,term_end), intent(in) :: exponents
+    real(dp), dimension(n_dim,n_quad),   intent(in) :: quad_pts
+    real(dp), dimension(n_quad),         intent(in) :: quad_wts
+    real(dp), dimension(term_end),       intent(in) :: moments_i, moments_j
+    real(dp), dimension(m_dim),          intent(in) :: x_ref_i, x_ref_j
+    real(dp), dimension(m_dim),          intent(in) :: h_ref_i, h_ref_j
+    real(dp), dimension(term_end - term_start, term_end - term_start), intent(out) :: A, B
+    real(dp), dimension(term_end - term_start, term_start),            intent(out) :: D, C
+    real(dp), dimension(term_end,term_end) :: d_basis_i, d_basis_j
+    real(dp), dimension(n_dim,n_quad) :: t_points_i, t_points_j
+    real(dp), dimension(term_end) :: scale
+    real(dp), dimension(n_dim) :: dij
+    real(dp) :: xdij_mag
+    integer :: q, l, m
+
+    A = zero; B = zero; C = zero; D = zero
+
+    t_points_i = transform_points(n_dim,n_quad,quad_pts,x_ref_i,h_ref_j)
+    t_points_j = transform_points(n_dim,n_quad,quad_pts,x_ref_j,h_ref_i)
+
+    scale = get_derivative_scaling( n_dim, term_end, exponents, dij )
+
+    dij = abs( x_ref_i - x_ref_j )
+    xdij_mag = one/norm2(dij)
+    do q = 1,n_quad
+      do m = 1,term_end
+        d_basis_i(:,m) = evaluate_basis_derivatives(n_dim,n_term,exponents,moments_i,t_points_i(:,q),h_ref_i,m) * scale
+        d_basis_j(:,m) = evaluate_basis_derivatives(n_dim,n_term,exponents,moments_j,t_points_j(:,q),h_ref_j,m) * scale
+      end do
+      ! LHS
+      do m = 1,term_end-term_start
+        do l = 1,term_end-term_start
+          A(l,m) = A(l,m) + quad_wts(q) * dot_product( d_basis_i(:,l+term_start), d_basis_i(:,m+term_start) )
+          B(l,m) = B(l,m) + quad_wts(q) * dot_product( d_basis_i(:,l+term_start), d_basis_j(:,m+term_start) )
+        end do
+      end do
+
+
+      ! RHS
+      do m = 1,term_start
+        do l = 1,term_end-term_start
+          D(l,m) = D(l,m) + quad_wts(q) * dot_product( d_basis_i(:,l+term_start), d_basis_i(:,m) )
+          C(l,m) = C(l,m) + quad_wts(q) * dot_product( d_basis_i(:,l+term_start), d_basis_j(:,m) )
+        end do
+      end do
+    end do
+    A = A * xdij_mag
+    B = B * xdij_mag
+    C = C * xdij_mag
+    D = D * xdij_mag
+  end subroutine get_nbor_contribution_matrices
+
+  pure subroutine get_RHS(n_dim,term_start,term_end,n_nbor,n_var,coefs_j,B,C,D,RHS)
+
+    integer, intent(in) :: n_dim, term_start, term_end, n_nbor, n_var
+    real(dp), dimension(term_end,n_var), intent(in) :: coefs_j
+    real(dp), dimension(term_end - term_start, term_end - term_start, n_nbor), intent(in) :: B
+    real(dp), dimension(term_end - term_start, term_start,n_nbor), intent(in) :: C
+    real(dp), dimension(term_end - term_start, term_start),        intent(in) :: D
+    real(dp), dimension(term_end -term_start,n_var),                     intent(out) :: RHS
+    integer :: n, v
+    RHS = zero
+    do v = 1,n_var
+      do n = 1,n_nbor
+        RHS(:,v) = RHS(:,v) + matmul( B(:,:,n), coefs_j(term_start:term_end,v) )
+        RHS(:,v) = RHS(:,v) + matmul( C(:,:,n), coefs_j(1:term_start,v) )
+      end do
+      RHS(:,v) = RHS(:,v) + matmul(D,coefs_j(1:term_start,v))
+    end do
+  end subroutine get_RHS
+
+  pure subroutine get_update(n_dim,term_start,term_end,n_var,coefs_i,A,RHS,update)
+    integer, intent(in) :: n_dim, term_start, term_end, n_var
+    real(dp), dimension(term_end,n_var), intent(in) :: coefs_i
+    real(dp), dimension(term_end - term_start, term_end - term_start), intent(in)  :: A
+    real(dp), dimension(term_end -term_start,n_var),                   intent(in)  :: RHS
+    real(dp), dimension(term_end -term_start,n_var),                   intent(out) :: update
+    integer :: v
+    update = zero
+    do v = 1, n_var
+    end do
+  end subroutine get_update
+
+end module all_together
+
+program main
+  use set_precision, only : dp
+  use set_constants, only : zero, large
+  use index_conversion, only : get_number_of_faces, enumerate_faces, fetch_faces
+  use index_conversion, only : global2local
+  use math, only : rand_int_in_range
+  use timer_derived_type, only : basic_timer_t
+
+  implicit none
+  type(basic_timer_t) :: timer
   integer :: n_dim, n_interior, n_boundary
-  integer, dimension(3) :: n_nodes, n_cells
-  n_dim   = 1
-  n_nodes = [11,2,2]
+  integer :: num_cells, cell_idx_linear
+  integer, dimension(3) :: n_nodes, n_cells, cell_idx
+  integer, dimension(:,:), allocatable :: faces
+  integer, dimension(:,:), allocatable :: face_idxs
+  integer :: j, n, N_repeat
+  real(dp) :: t, avg_t, min_t, max_t
+  real(dp) :: avg_t_avg, avg_t_min, avg_t_max
+  real(dp) :: min_t_avg, min_t_min, min_t_max
+  real(dp) :: max_t_avg, max_t_min, max_t_max
+
+  n_dim   = 3
+  n_nodes = [101,101,101]
   n_cells = n_nodes - 1
-  call get_number_of_faces(n_dim,n_cells(1:n_dim),n_interior,n_boundary)
-  write(*,*) n_cells
-  write(*,*) product(n_cells)
-  write(*,*) n_interior
-  write(*,*) n_boundary
+  num_cells = product( n_cells )
+
+  allocate( faces(2*n_dim,product(n_cells)) )
+  allocate( face_idxs(n_dim+1,2*n_dim) )
+  call enumerate_faces(n_dim,n_cells,faces)
+
+
+  ! cell_idx = [1,1,1]
+  ! call fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
+  ! write(*,*) cell_idx
+  ! write(*,*)
+  ! do n = 1,2*n_dim
+  !   write(*,*) face_idxs(:,n)
+  ! end do
+
+  ! call get_number_of_faces(n_dim,n_cells(1:n_dim),n_interior,n_boundary)
+  ! write(*,*) n_cells
+  ! write(*,*) product(n_cells)
+  ! write(*,*) n_interior
+  ! write(*,*) n_boundary
+
+  N_repeat = 10
+  
+
+  avg_t_avg = zero
+  avg_t_min = large
+  avg_t_max = zero
+
+  min_t_avg = zero
+  min_t_min = large
+  min_t_max = zero
+
+  max_t_avg = zero
+  max_t_min = large
+  max_t_max = zero
+
+  do j = 1,N_repeat
+    avg_t = zero
+    min_t = large
+    max_t = zero
+    do n = 1,num_cells
+      cell_idx  = 0
+      face_idxs = 0
+      cell_idx_linear = rand_int_in_range(1,num_cells)
+      cell_idx = global2local(cell_idx_linear,n_cells)
+      call timer%tic()
+      call fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
+      t = timer%toc()
+      min_t = min(min_t,t)
+      max_t = max(max_t,t)
+      avg_t = avg_t + t
+    end do
+    avg_t = avg_t / real(num_cells,dp)
+
+    avg_t_avg = avg_t_avg + avg_t
+    avg_t_min = min(avg_t_min,avg_t)
+    avg_t_max = max(avg_t_max,avg_t)
+
+    min_t_avg = min_t_avg + min_t
+    min_t_min = min(min_t_min,min_t)
+    min_t_max = max(min_t_max,min_t)
+
+    max_t_avg = max_t_avg + max_t
+    max_t_min = min(max_t_min,max_t)
+    max_t_max = max(max_t_max,max_t)
+  end do
+
+  avg_t_avg = avg_t_avg / real(N_repeat,dp)
+  min_t_avg = min_t_avg / real(N_repeat,dp)
+  max_t_avg = max_t_avg / real(N_repeat,dp)
+
+  write(*,*) 'Average Average time: ', avg_t_avg
+  write(*,*) 'Minimum Average time: ', avg_t_min
+  write(*,*) 'Maximum Average time: ', avg_t_max
+  write(*,*)
+  write(*,*) 'Average Minimum time: ', min_t_avg
+  write(*,*) 'Minimum Minimum time: ', min_t_min
+  write(*,*) 'Maximum Minimum time: ', min_t_max
+  write(*,*)
+  write(*,*) 'Average Maximum time: ', max_t_avg
+  write(*,*) 'Minimum Maximum time: ', max_t_min
+  write(*,*) 'Maximum Maximum time: ', max_t_max
+  write(*,*)
+
+  deallocate( faces, face_idxs )
 end program main
 
 ! program main
