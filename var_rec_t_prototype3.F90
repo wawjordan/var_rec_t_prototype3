@@ -2737,7 +2737,7 @@ contains
     real(dp), dimension(n_dim,n_quad), intent(in) :: t_quad_pts
     real(dp), dimension(n_quad),       intent(in) :: quad_wts
     real(dp), dimension(n_term)                   :: moments
-    real(dp), dimension(n_dim)       :: tmp_val
+    real(dp)       :: tmp_val
     integer :: m, n, coef
     do m = 1,n_term
       do n = 1,n_quad
@@ -2788,13 +2788,13 @@ contains
     real(dp)                                      :: dB
     integer :: coef, dcoef
     integer, dimension(3) :: e, o
-    if (all(order==0)) then
+    o = exponents(:,order_term)
+    if (all(o==0)) then
       dB =  evaluate_basis(n_dim,n_term,exponents,moments,t_point,term)
-    elseif(term==1)
+    elseif(term==1) then
       dB = 0
     else
       e = exponents(:,term)
-      o = exponents(:,order_term)
       call evaluate_monomial_derivative(n_dim,e,o,t_point,dB,dcoef,coef)
       dB = dB * real(dcoef,dp) / product( h_ref**o )
     end if
@@ -2808,9 +2808,10 @@ contains
     real(dp), dimension(n_dim),        intent(in) :: t_point, h_ref
     integer,                           intent(in) :: term
     real(dp), dimension(n_term)                   :: dB
+    integer :: n
     dB = zero
     do n = 1,term
-      dB(n) = evaluate_basis_derivative(n_dim,n_terms,exponents,moments,t_point,h_ref,term,n)
+      dB(n) = evaluate_basis_derivative(n_dim,n_term,exponents,moments,t_point,h_ref,term,n)
     end do
   end function evaluate_basis_derivatives
 
@@ -2835,8 +2836,8 @@ contains
     real(dp), dimension(n_dim,n_quad),   intent(in) :: quad_pts
     real(dp), dimension(n_quad),         intent(in) :: quad_wts
     real(dp), dimension(term_end),       intent(in) :: moments_i, moments_j
-    real(dp), dimension(m_dim),          intent(in) :: x_ref_i, x_ref_j
-    real(dp), dimension(m_dim),          intent(in) :: h_ref_i, h_ref_j
+    real(dp), dimension(n_dim),          intent(in) :: x_ref_i, x_ref_j
+    real(dp), dimension(n_dim),          intent(in) :: h_ref_i, h_ref_j
     real(dp), dimension(term_end - term_start, term_end - term_start), intent(out) :: A, B
     real(dp), dimension(term_end - term_start, term_start),            intent(out) :: D, C
     real(dp), dimension(term_end,term_end) :: d_basis_i, d_basis_j
@@ -2857,8 +2858,8 @@ contains
     xdij_mag = one/norm2(dij)
     do q = 1,n_quad
       do m = 1,term_end
-        d_basis_i(:,m) = evaluate_basis_derivatives(n_dim,n_term,exponents,moments_i,t_points_i(:,q),h_ref_i,m) * scale
-        d_basis_j(:,m) = evaluate_basis_derivatives(n_dim,n_term,exponents,moments_j,t_points_j(:,q),h_ref_j,m) * scale
+        d_basis_i(:,m) = evaluate_basis_derivatives(n_dim,term_end,exponents,moments_i,t_points_i(:,q),h_ref_i,m) * scale
+        d_basis_j(:,m) = evaluate_basis_derivatives(n_dim,term_end,exponents,moments_j,t_points_j(:,q),h_ref_j,m) * scale
       end do
       ! LHS
       do m = 1,term_end-term_start
@@ -2911,6 +2912,7 @@ contains
     integer :: v
     update = zero
     do v = 1, n_var
+      ! update(:,v) = A \ RHS(:,v)
     end do
   end subroutine get_update
 
