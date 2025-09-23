@@ -303,6 +303,7 @@ module index_conversion
   public :: get_face_idx_from_id
   public :: get_reshape_indices
   public :: get_number_of_faces, enumerate_faces, fetch_faces
+  public :: num_interior_faces, num_boundary_faces, num_total_faces
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -506,6 +507,14 @@ contains
     n_boundary = n_total - n_interior
   end subroutine get_number_of_faces
 
+  pure function num_total_faces(n_cells) result(n_faces)
+    integer, dimension(:), intent(in) :: n_cells
+    integer                           :: n_faces
+    integer :: n_interior, n_boundary
+    call get_number_of_faces(size(n_cells),n_cells,n_interior,n_boundary)
+    n_faces = n_interior + n_boundary
+  end function num_total_faces
+
   pure function num_interior_faces(n_cells) result(n_faces)
     integer, dimension(:), intent(in) :: n_cells
     integer                           :: n_faces
@@ -674,6 +683,12 @@ module math
   public :: LegendrePolynomialAndDerivative, LegendreGaussNodesAndWeights
   public :: maximal_diameter, maximal_extents
   public :: rand_int_in_range
+
+
+  interface LUsolve
+    module procedure LUsolve_single_rhs
+    module procedure LUsolve_multiple_rhs
+  end interface
 contains
 
   impure elemental function rand_int_in_range(lo,hi) result(num)
@@ -719,7 +734,7 @@ contains
 !! LU decomposition, with pivoting, for a regular NxN dense array
 !<
 !=============================================================================80
-  subroutine LUdecomp( LU, P, A, m )
+  pure subroutine LUdecomp( LU, P, A, m )
     use set_precision, only : dp
     use set_constants, only : zero, one
     real(dp), dimension(m,m), intent(out) :: LU,P
@@ -761,7 +776,7 @@ contains
 !! LU solve for a regular dense array
 !<
 !=============================================================================80
-  subroutine LUsolve( x, LU, P, bin, m )
+  pure subroutine LUsolve_single_rhs( x, LU, P, bin, m )
     use set_precision, only : dp
     real(dp), dimension(m),   intent(out) :: x
     real(dp), dimension(m,m), intent(in)  :: LU, P
@@ -782,7 +797,18 @@ contains
       row = m-i
       x(row) = ( d(row) - sum( LU(row,row+1:m)*x(row+1:m) ) ) / LU(row,row)
     end do
-  end subroutine LUsolve
+  end subroutine LUsolve_single_rhs
+
+  pure subroutine LUsolve_multiple_rhs(x,LU,P,bin,m,n_rhs)
+    real(dp), dimension(m,n_rhs), intent(out) :: x
+    real(dp), dimension(m,m),     intent(in)  :: LU, P
+    real(dp), dimension(m,n_rhs), intent(in)  :: bin
+    integer,                      intent(in)  :: m, n_rhs
+    integer :: n
+    do n = 1, n_rhs
+      call LUsolve_single_rhs(x(:,n),LU,P,bin(:,n),m)
+    end do
+  end subroutine LUsolve_multiple_rhs
 
 !================================== mat_inv ==================================80
 !>
@@ -2548,19 +2574,17 @@ end function scaled_basis_derivatives
 end module zero_mean_basis_derived_type
 
 module var_rec_derived_type
-  use set_precision,                only : dp
-  use monomial_basis_derived_type,  only : monomial_basis_t
-  use zero_mean_basis_derived_type, only : zero_mean_basis_t
-  use quadrature_derived_type,      only : quad_t
+  use set_precision, only : dp
+  use set_constants, only : zero, one
+  use monomial_basis_derived_type, only : monomial_basis_t
   implicit none
-  private
   public :: var_rec_t
   type :: var_rec_t
     ! private
     integer :: self_block
-    integer :: n_vars
-    integer :: n_cells, n_interior_faces, n_boundary_faces
-    ! integer,  dimension(:),       allocatable :: self_idx
+    integer :: n_vars, n_quad
+    integer :: n_cells, n_faces
+    integer,  dimension(:),       allocatable :: interior_face_cnt
     integer,  dimension(:,:),     allocatable :: nbor_idx, face_idx
     real(dp), dimension(:,:),     allocatable :: x_ref, h_ref
     real(dp), dimension(:,:),     allocatable :: moments
@@ -2587,99 +2611,99 @@ module var_rec_derived_type
     ! procedure, public, pass :: get_nbor_contribution
     ! procedure, public, pass :: get_self_RHS_contribution
     ! procedure, public, pass :: get_nbor_RHS_contribution
-    ! procedure, public, pass :: destroy => destroy_var_rec_t
+    procedure, public, pass :: destroy => destroy_var_rec_t
   end type var_rec_t
-
-  ! interface var_rec_t
-  !   procedure constructor
-  ! end interface var_rec_t
+  interface var_rec_t
+    procedure constructor
+  end interface var_rec_t
 
 contains
 
-  ! function constructor( gblock, n_vars, mono_basis ) result(this)
-  !   use set_constants, only : zero
-  !   call this%destroy()
-  !   this%mono_basis    = mono_basis
-  !   this%total_degree => mono_basis%total_degree
-  !   this%n_dim        => mono_basis%n_dim
-  !   this%n_terms      => mono_basis%n_terms
-  !   this%idx          => mono_basis%idx
-  !   this%exponents    => mono_basis%exponents
+  function constructor( gblock, n_vars, mono_basis ) result(this)
+    use set_constants, only : zero
+    use math,             only : maximal_extents
+    use index_conversion, only : num_total_faces, global2local
+    use grid_derived_type, only : grid_block, pack_cell_node_coords
+    type(grid_block), intent(in) :: gblock
+    integer,          intent(in) :: n_vars
+    type(monomial_basis_t), intent(in) :: mono_basis
+    type(var_rec_t), target :: this
+    integer :: i, n
+    integer, dimension(gblock%n_dim) :: cell_idx
+    integer, dimension(3) :: tmp_idx
+    real(dp), dimension(3,8) :: nodes
+    real(dp), dimension(:,:), allocatable :: t_quad_pts
+    call this%destroy()
+    this%mono_basis    = mono_basis
+    this%total_degree => this%mono_basis%total_degree
+    this%n_dim        => this%mono_basis%n_dim
+    this%n_terms      => this%mono_basis%n_terms
+    this%idx          => this%mono_basis%idx
+    this%exponents    => this%mono_basis%exponents
+    this%n_quad  = maxval(gblock%grid_vars%quad%n_quad)
+    this%n_cells = product(gblock%n_cells)
+    this%n_faces = num_total_faces(gblock%n_cells)
+    this%n_vars  = n_vars
 
-  !   this%n_cells = product(gblock%n_cells)
-  !   this%n_interior_faces = 0
-  !   this%n_boundary_faces = 0
-  !   allocate( this%nbor_idx( 2*this%n_dim, this%n_interior_faces ) )
-  !   allocate( this%face_id(  2*this%n_dim, this%n_interior_faces ) )
-  !   allocate( this%x_ref(      this%n_dim, this%n_interior_faces ) )
-  !   allocate( this%h_ref(      this%n_dim, this%n_interior_faces ) )
-  !   allocate( this%moments(    this%n_terms, this%n_interior_faces ) )
-  !   ! allocate( this%quad_wts(   this%n_terms, this%n_interior_faces ) )
-  !   real(dp), dimension(:,:),     allocatable :: quad_wts
-  !   real(dp), dimension(:,:,:),   allocatable :: quad_pts
-  !   real(dp), dimension(:,:,:),   allocatable :: coefs
-  !   real(dp), dimension(:,:,:),   allocatable :: A_inv
-  !   real(dp), dimension(:,:,:),   allocatable :: A_inv_D
-  !   real(dp), dimension(:,:,:,:), allocatable :: A_inv_B
-  !   real(dp), dimension(:,:,:,:), allocatable :: A_inv_C
-  !   real(dp), dimension(:,:,:),   allocatable :: A_inv_RHS
-  !   real(dp), dimension(:,:,:),   allocatable :: A, D
-  !   real(dp), dimension(:,:,:,:), allocatable :: B, C
-  !   allocate( this%moments( this%n_terms ) )
-  !   allocate( this%x_ref( this%n_dim ) )
-  !   allocate( this%h_ref( this%n_dim ) )
-  !   this%h_ref = h_ref
-  !   this%x_ref = quad%integrate( this%n_dim, quad%quad_pts(1:this%n_dim,:) ) / sum( quad%quad_wts )
-  !   do n = 1,this%n_terms
-  !     this%moments(n) = this%compute_grid_moment(n,quad)
-  !   end do
-  ! end function constructor
-end module var_rec_derived_type
+    allocate(t_quad_pts(this%n_dim,this%n_quad))
+    t_quad_pts = zero
 
-module test_problem
-  use set_precision, only : dp
-  implicit none
-  private
-  public :: setup_grid
-contains
+    allocate( this%nbor_idx( 2*this%n_dim, this%n_cells ) )
+    allocate( this%face_idx( 2*this%n_dim, this%n_cells ) )
+    allocate( this%interior_face_cnt(  this%n_cells ) )
+    allocate( this%x_ref(    this%n_dim, this%n_cells ) )
+    allocate( this%h_ref(    this%n_dim, this%n_cells ) )
+    allocate( this%moments(  this%n_terms, this%n_cells ) )
+    allocate( this%coefs(  this%n_terms, this%n_vars, this%n_cells ) )
+    allocate( this%quad_wts( this%n_quad, this%n_faces ) )
+    allocate( this%quad_pts( this%n_dim, this%n_quad, this%n_faces ) )
+    this%nbor_idx = 0
+    this%face_idx = 0
+    this%interior_face_cnt = 0
+    this%x_ref = zero
+    this%moments = zero
+    this%coefs   = zero
+    this%quad_wts = zero
+    this%quad_pts = zero
+    do i = 1,this%n_cells
+      cell_idx = global2local(i,gblock%n_cells)
+      tmp_idx = 1
+      tmp_idx(1:this%n_dim) = cell_idx
+      nodes = pack_cell_node_coords(tmp_idx,[1,1,1],gblock%n_nodes,gblock%node_coords)
+      this%h_ref(:,i) = maximal_extents(gblock%n_dim, 8, nodes )
+      associate( quad => gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)) )
+        this%x_ref(:,i) = quad%integrate( this%n_dim, quad%quad_pts(1:this%n_dim,:) ) / sum( quad%quad_wts )
+        t_quad_pts = transform_points(this%n_dim,this%n_quad,quad%quad_pts,this%x_ref(:,i),this%h_ref(:,i))
+        this%moments(:,i) = compute_grid_moments(gblock%n_dim,this%n_terms,this%n_quad,this%exponents,t_quad_pts,quad%quad_wts)
+      end associate
+      ! get neighbors, get idxs, copy over quadrature points
+      end do
+  end function constructor
 
-  pure function test_function_1(n_var,x) result(val)
-    integer,                intent(in) :: n_var
-    real(dp), dimension(:), intent(in) :: x
-    real(dp), dimension(n_var)         :: val
+  pure elemental subroutine destroy_var_rec_t( this )
+    class(var_rec_t), intent(inout) :: this
+    if (allocated(this%nbor_idx) ) deallocate( this%nbor_idx )
+    if (allocated(this%face_idx) ) deallocate( this%face_idx )
+    if (allocated(this%interior_face_cnt) ) deallocate( this%interior_face_cnt )
+    if (allocated(this%x_ref) ) deallocate( this%x_ref )
+    if (allocated(this%h_ref) ) deallocate( this%h_ref )
+    if (allocated(this%moments) ) deallocate( this%moments )
+    if (allocated(this%coefs) ) deallocate( this%coefs )
+    if (allocated(this%quad_wts) ) deallocate( this%quad_wts )
+    if (allocated(this%quad_pts) ) deallocate( this%quad_pts )
+    this%total_degree => null()
+    this%n_dim        => null()
+    this%n_terms      => null()
+    this%idx          => null()
+    this%exponents    => null()
+    call this%mono_basis%destroy()
+    this%n_quad = 0
+    this%n_cells = 0
+    this%n_faces = 0
+    this%n_vars = 0
 
-    val(1) = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
-  end function test_function_1
-
-  pure function test_function_2(n_var,x) result(val)
-  use set_constants, only : pi
-    integer,                intent(in) :: n_var
-    real(dp), dimension(:), intent(in) :: x
-    real(dp), dimension(n_var)         :: val
-    val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
-    ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
-  end function test_function_2
-
-  subroutine setup_grid( n_dim, n_nodes, n_ghost, grid )
-    use grid_derived_type, only : grid_type
-    use linspace_helper,   only : unit_cartesian_mesh_cat
-    integer,                     intent(in)  :: n_dim
-    integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
-    type(grid_type),             intent(out) :: grid
-
-    call grid%setup(1)
-    call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
-    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
-    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
-  end subroutine setup_grid
-
-end module test_problem
-
-module all_together
-  use set_precision, only : dp
-  use set_constants, only : zero, one
-  implicit none
-contains
+  end subroutine destroy_var_rec_t
+    
   pure subroutine evaluate_monomial(n_dim,e,x,val,coef)
     integer,                    intent(in)  :: n_dim
     integer,  dimension(n_dim), intent(in)  :: e
@@ -2884,39 +2908,173 @@ contains
     D = D * xdij_mag
   end subroutine get_nbor_contribution_matrices
 
-  pure subroutine get_RHS(n_dim,term_start,term_end,n_nbor,n_var,coefs_j,B,C,D,RHS)
+  pure subroutine get_RHS_nbor_contribution(n_dim,term_start,term_end,n_var,coefs_j,B,C,RHS)
 
-    integer, intent(in) :: n_dim, term_start, term_end, n_nbor, n_var
+    integer, intent(in) :: n_dim, term_start, term_end, n_var
     real(dp), dimension(term_end,n_var), intent(in) :: coefs_j
-    real(dp), dimension(term_end - term_start, term_end - term_start, n_nbor), intent(in) :: B
-    real(dp), dimension(term_end - term_start, term_start,n_nbor), intent(in) :: C
-    real(dp), dimension(term_end - term_start, term_start),        intent(in) :: D
-    real(dp), dimension(term_end -term_start,n_var),                     intent(out) :: RHS
-    integer :: n, v
+    real(dp), dimension(term_end - term_start, term_end - term_start), intent(in) :: B
+    real(dp), dimension(term_end - term_start, term_start), intent(in) :: C
+    real(dp), dimension(term_end -term_start,n_var),        intent(out) :: RHS
+    integer :: v
     RHS = zero
     do v = 1,n_var
-      do n = 1,n_nbor
-        RHS(:,v) = RHS(:,v) + matmul( B(:,:,n), coefs_j(term_start:term_end,v) )
-        RHS(:,v) = RHS(:,v) + matmul( C(:,:,n), coefs_j(1:term_start,v) )
+        RHS(:,v) = RHS(:,v) + matmul( B, coefs_j(term_start:term_end,v) )
+        RHS(:,v) = RHS(:,v) + matmul( C, coefs_j(1:term_start,v) )
       end do
-      RHS(:,v) = RHS(:,v) + matmul(D,coefs_j(1:term_start,v))
-    end do
-  end subroutine get_RHS
+      ! RHS(:,v) = RHS(:,v) + matmul(D,coefs_j(1:term_start,v))
+  end subroutine get_RHS_nbor_contribution
 
-  pure subroutine get_update(n_dim,term_start,term_end,n_var,coefs_i,A,RHS,update)
+  pure subroutine get_RHS_self_contribution(n_dim,term_start,term_end,n_var,coefs_i,D,RHS)
     integer, intent(in) :: n_dim, term_start, term_end, n_var
-    real(dp), dimension(term_end,n_var), intent(in) :: coefs_i
+    real(dp), dimension(term_end,n_var),                    intent(in)  :: coefs_i
+    real(dp), dimension(term_end - term_start, term_start), intent(in)  :: D
+    real(dp), dimension(term_end -term_start,n_var),        intent(out) :: RHS
+    integer :: v
+    RHS = zero
+    do v = 1,n_var
+      RHS(:,v) = RHS(:,v) + matmul(D,coefs_i(1:term_start,v))
+    end do
+  end subroutine get_RHS_self_contribution
+
+  pure subroutine get_update(term_start,term_end,n_var,A,RHS,update)
+    use math, only : LUdecomp, LUsolve
+    integer, intent(in) :: term_start, term_end, n_var
     real(dp), dimension(term_end - term_start, term_end - term_start), intent(in)  :: A
     real(dp), dimension(term_end -term_start,n_var),                   intent(in)  :: RHS
     real(dp), dimension(term_end -term_start,n_var),                   intent(out) :: update
-    integer :: v
-    update = zero
-    do v = 1, n_var
-      ! update(:,v) = A \ RHS(:,v)
-    end do
+    real(dp), dimension(term_end - term_start, term_end - term_start) :: LU, P
+    call LUdecomp(LU,P,A,term_end - term_start)
+    call LUsolve(update,LU,P,RHS,term_end - term_start,n_var)
   end subroutine get_update
 
-end module all_together
+  pure subroutine get_residual(term_start,term_end,n_var,coefs_i,A,RHS,residual)
+    integer, intent(in) :: term_start, term_end, n_var
+    real(dp), dimension(term_end,n_var), intent(in) :: coefs_i
+    real(dp), dimension(term_end - term_start, term_end - term_start), intent(in)  :: A
+    real(dp), dimension(term_end -term_start,n_var),                   intent(in)  :: RHS
+    real(dp), dimension(term_end -term_start,n_var),                   intent(out) :: residual
+    integer :: v
+    do v = 1, n_var
+      residual(:,v) = matmul(A,coefs_i(term_start:term_end,v)) - RHS(:,v)
+    end do
+  end subroutine get_residual
+
+  pure subroutine cell_update( n_cells, n_faces, n_dim, n_var, n_quad, term_start, term_end,  &
+                               cell_idx, interior_face_cnt, nbor_idx, face_idx,&
+                               exponents, quad_pts, quad_wts, x_ref, h_ref, moments, coefs, &
+                               update, residual )
+    integer,                                     intent(in) :: n_cells, n_faces, n_dim, n_var, n_quad
+    integer,                                     intent(in) :: term_start, term_end
+    integer,                                     intent(in) :: cell_idx
+    integer,  dimension(n_cells),                intent(in) :: interior_face_cnt
+    integer,  dimension(2*n_dim,n_cells),        intent(in) :: nbor_idx, face_idx
+    integer,  dimension(n_dim,term_end),         intent(in) :: exponents
+    real(dp), dimension(n_dim,n_quad,n_faces),   intent(in) :: quad_pts
+    real(dp), dimension(n_quad,n_faces),         intent(in) :: quad_wts
+    real(dp), dimension(n_dim,n_cells),          intent(in) :: x_ref, h_ref
+    real(dp), dimension(term_end,n_cells),       intent(in) :: moments
+    real(dp), dimension(term_end,n_var,n_cells), intent(in) :: coefs
+    real(dp), dimension(term_end-term_start,n_var), intent(out) :: update, residual
+    real(dp), dimension(term_end - term_start, term_end - term_start) :: dA, A, B
+    real(dp), dimension(term_end - term_start, term_start)            :: dD, D, C
+    real(dp), dimension(term_end - term_start,n_var) :: dRHS, RHS
+    integer :: i, j, k, n, n_nbor
+    i = cell_idx
+    n_nbor = interior_face_cnt(i)
+    A = zero; B = zero; C = zero; D = zero; RHS = zero
+    do n = 1,n_nbor
+      j = nbor_idx(n,i)
+      k = face_idx(n,i)
+      call get_nbor_contribution_matrices( n_dim, term_start, term_end, n_quad, exponents,             &
+                                           quad_pts(:,:,k), quad_wts(:,k),                           &
+                                           moments(:,i), x_ref(:,i), h_ref(:,i),         &
+                                           moments(:,j), x_ref(:,j), h_ref(:,j),         &
+                                           dA, B, dD, C )
+      call get_RHS_nbor_contribution( n_dim, term_start, term_end, n_var, coefs(:,:,j), B, C, dRHS )
+      A = A + dA
+      D = D + dD
+      RHS = RHS + dRHS
+    end do
+    call get_RHS_self_contribution(n_dim, term_start, term_end, n_var, coefs(:,:,i), D, dRHS )
+    RHS = RHS + dRHS
+
+    call get_update(term_start,term_end,n_var,A,RHS,update)
+    call get_residual(term_start,term_end,n_var,coefs(:,:,i),A,RHS,residual)
+  end subroutine cell_update
+
+  pure subroutine SOR_update(  n_cells, n_faces, n_dim, n_var, n_quad, term_start, term_end,  &
+                               interior_face_cnt, nbor_idx, face_idx, exponents, quad_pts,    &
+                               quad_wts, x_ref, h_ref, moments, omega, coefs, residual_norms )
+    integer,                                     intent(in) :: n_cells, n_faces, n_dim, n_var, n_quad
+    integer,                                     intent(in) :: term_start, term_end
+    integer,  dimension(n_cells),                intent(in) :: interior_face_cnt
+    integer,  dimension(2*n_dim,n_cells),        intent(in) :: nbor_idx, face_idx
+    integer,  dimension(n_dim,term_end),         intent(in) :: exponents
+    real(dp), dimension(n_dim,n_quad,n_faces),   intent(in) :: quad_pts
+    real(dp), dimension(n_quad,n_faces),         intent(in) :: quad_wts
+    real(dp), dimension(n_dim,n_cells),          intent(in) :: x_ref, h_ref
+    real(dp), dimension(term_end,n_cells),       intent(in) :: moments
+    real(dp),                                    intent(in) :: omega
+    real(dp), dimension(term_end,n_var,n_cells), intent(inout) :: coefs
+    real(dp), dimension(term_end-term_start,n_var,3), intent(out) :: residual_norms
+    real(dp), dimension(term_end-term_start,n_var) :: update, residual_update
+    integer :: i
+    residual_norms  = zero
+    do i = 1,n_cells
+      call cell_update( n_cells, n_faces, n_dim, n_var, n_quad, term_start, term_end,  &
+                        i, interior_face_cnt, nbor_idx, face_idx,               &
+                        exponents, quad_pts, quad_wts, x_ref, h_ref, moments, coefs,   &
+                        update, residual_update )
+      residual_update = abs(residual_update)
+      coefs(:,:,i) = (one-omega)*coefs(:,:,i) + omega*update
+      residual_norms(:,:,1) = residual_norms(:,:,1) + residual_update
+      residual_norms(:,:,2) = residual_norms(:,:,2) + residual_update**2
+      residual_norms(:,:,3) = max(residual_norms(:,:,3), residual_update)
+    end do
+    residual_norms(:,:,1) = residual_norms(:,:,1) / real(n_cells,dp)
+    residual_norms(:,:,2) = sqrt( residual_norms(:,:,2) / real(n_cells,dp) )
+  end subroutine SOR_update
+
+end module var_rec_derived_type
+
+module test_problem
+  use set_precision, only : dp
+  implicit none
+  private
+  public :: setup_grid
+contains
+
+  pure function test_function_1(n_var,x) result(val)
+    integer,                intent(in) :: n_var
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), dimension(n_var)         :: val
+
+    val(1) = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+  end function test_function_1
+
+  pure function test_function_2(n_var,x) result(val)
+  use set_constants, only : pi
+    integer,                intent(in) :: n_var
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), dimension(n_var)         :: val
+    val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
+    ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
+  end function test_function_2
+
+  subroutine setup_grid( n_dim, n_nodes, n_ghost, grid )
+    use grid_derived_type, only : grid_type
+    use linspace_helper,   only : unit_cartesian_mesh_cat
+    integer,                     intent(in)  :: n_dim
+    integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
+    type(grid_type),             intent(out) :: grid
+
+    call grid%setup(1)
+    call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
+    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
+    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
+  end subroutine setup_grid
+
+end module test_problem
 
 program main
   use set_precision, only : dp
