@@ -376,6 +376,8 @@ module index_conversion
   public :: get_number_of_faces, enumerate_faces, fetch_faces
   public :: get_number_of_interior_faces, get_number_of_boundary_faces
   public :: global2local_face, local2global_face
+  public :: z_indexer
+  public :: generate_faces
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -436,7 +438,7 @@ contains
     integer(i8), dimension(get_number_of_faces(3,n_cells)) :: indx, A
     integer, dimension(3) :: sz_tmp
     integer :: n_faces
-    integer :: i, j, k, cnt
+    integer :: i, j, k, cnt, tmp1, tmp2
 
     n_faces = get_number_of_faces(n_dim,n_cells(1:n_dim))
     sz_tmp = n_cells
@@ -445,15 +447,16 @@ contains
     cnt = 0
     do k = 2,sz_tmp(3),2
       do j = 2,sz_tmp(2),2
-        do i = 1,sz_tmp(1),2
+        do i = 1,sz_tmp(1)+1,2
           cnt = cnt + 1
+          ! write(*,*) i,j,k
           A(cnt) = this%pos_to_z(i,j,k)
         end do
       end do
     end do
 
     do k = 2,sz_tmp(3),2
-      do j = 1,sz_tmp(2),2
+      do j = 1,sz_tmp(2)+1,2
         do i = 2,sz_tmp(1),2
           cnt = cnt + 1
           A(cnt) = this%pos_to_z(i,j,k)
@@ -461,7 +464,7 @@ contains
       end do
     end do
 
-    do k = 1,sz_tmp(3),2
+    do k = 1,sz_tmp(3)+1,2
       do j = 2,sz_tmp(2),2
         do i = 2,sz_tmp(1),2
           cnt = cnt + 1
@@ -469,6 +472,7 @@ contains
         end do
       end do
     end do
+    indx = [(i,i=1,n_faces)]
     call qsort_i8_1D(int(n_faces,i8),A,indx)
     face_idx = int(indx)
   end subroutine generate_face_idx_order
@@ -541,6 +545,159 @@ contains
     nSub = hi - lo + 1
     iG   = local2global(idx,nSub)
   end function local2global_bnd
+
+  pure function get_face_intervals(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer,  dimension(n_dim)             :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    tmp = n_cells
+    tmp(1) = tmp(1) + 1
+    n_faces(1) = product(tmp)
+    do d = 2,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) + 1
+      n_faces(d) = n_faces(d-1) + product(tmp)
+    end do
+  end function get_face_intervals
+
+  pure function get_number_of_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    n_faces = 0
+    do d = 1,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) + 1
+      n_faces = n_faces + product(tmp)
+    end do
+  end function get_number_of_faces
+
+  pure function get_number_of_interior_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    n_faces = 0
+    do d = 1,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) - 1
+      n_faces = n_faces + product(tmp)
+    end do
+  end function get_number_of_interior_faces
+
+  pure function get_number_of_boundary_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    n_faces = get_number_of_faces(n_dim,n_cells) - get_number_of_interior_faces(n_dim,n_cells)
+  end function get_number_of_boundary_faces
+
+  pure subroutine local2global_face(n_dim,n_cells,dir,local_idx,lin_face_idx)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer,                   intent(in)  :: dir
+    integer, dimension(n_dim), intent(in)  :: local_idx
+    integer,                   intent(out) :: lin_face_idx
+    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: nsub
+    idx_extents(1) = 1
+    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
+    nsub = n_cells
+    nsub(dir) = nsub(dir) + 1
+    lin_face_idx = idx_extents(dir) - 1 + local2global(local_idx,nsub)
+  end subroutine local2global_face
+
+  pure subroutine global2local_face(n_dim,n_cells,lin_face_idx,dir,local_idx)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer,                   intent(in)  :: lin_face_idx
+    integer,                   intent(out) :: dir
+    integer, dimension(n_dim), intent(out) :: local_idx
+    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: nsub
+    integer, dimension(1) :: loc
+    idx_extents(1) = 1
+    idx_extents(2:n_dim+1) = get_face_intervals(n_dim,n_cells)
+    loc = findloc((lin_face_idx <= idx_extents(2:n_dim+1)),.true.,back=.false.)
+    dir = loc(1)
+    nsub = n_cells
+    nsub(dir) = nsub(dir) + 1
+    local_idx = global2local( lin_face_idx-idx_extents(dir)+1,nsub)
+  end subroutine global2local_face
+
+  pure subroutine generate_faces(n_dim,n_cells,mult,n_faces,faces)
+    integer,                           intent(in)  :: n_dim
+    integer, dimension(n_dim),         intent(in)  :: n_cells
+    integer,                           intent(in)  :: mult 
+    integer,                           intent(in)  :: n_faces 
+    integer, dimension(n_dim+1,n_faces), intent(out) :: faces
+    integer, dimension(n_dim) :: face_sz
+    integer :: d, i, cnt, sz
+    cnt = 0
+    do d = 1,n_dim
+      face_sz = n_cells
+      face_sz(d) = face_sz(d) + 1
+      sz = product(face_sz)
+      do i = 1,sz
+        cnt = cnt + 1
+        call global2local_face(n_dim,n_cells,cnt,faces(1,cnt),faces(2:n_dim,cnt))
+        faces(2:n_dim,cnt) = mult*faces(2:n_dim,cnt)
+        faces(1+d,cnt) = faces(1+d,cnt) - 1
+      end do
+    end do
+  end subroutine generate_faces
+
+  pure subroutine enumerate_faces(n_dim,n_cells,faces)
+    integer,                   intent(in) :: n_dim
+    integer, dimension(n_dim), intent(in) :: n_cells
+    integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
+    integer, dimension(n_dim) :: cell_idx, face_sz, face_idx
+    integer :: cnt, d, n
+    do n = 1,product(n_cells)
+      cell_idx = global2local(n,n_cells)
+      cnt = 0
+      do d = 1,n_dim
+        face_sz = n_cells
+        face_sz(d) = face_sz(d) + 1
+
+        cnt = cnt + 1
+        face_idx = cell_idx + 1
+        face_idx(d) = face_idx(d) - 1 ! lo face
+        faces(cnt,n) = local2global(face_idx,face_sz)
+
+        cnt = cnt + 1
+        face_idx = cell_idx
+        face_idx(d) = face_idx(d) + 1 ! hi face
+        faces(cnt,n) = local2global(face_idx,face_sz)
+      end do
+    end do
+  end subroutine enumerate_faces
+
+  pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
+    integer, intent(in) :: n_dim
+    integer, dimension(n_dim), intent(in) :: n_cells
+    integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
+    integer, dimension(n_dim), intent(in) :: cell_idx
+    integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
+    integer, dimension(n_dim) :: face_sz
+
+    integer :: cnt, dir, n, cell_idx_linear
+    cell_idx_linear = local2global(cell_idx,n_cells)
+    cnt = 0
+    do n = 1,2*n_dim
+      cnt = cnt + 1
+      dir = (n-1)/2 + 1 ! direction
+      face_idxs(1,cnt) = dir
+      face_sz = n_cells
+      face_sz(dir) = face_sz(dir) + 1
+      face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
+    end do
+  end subroutine fetch_faces
 
   pure function in_bound( dim, idx, bnd_min, bnd_max )
     integer,                 intent(in) :: dim
@@ -651,138 +808,6 @@ contains
 
   end subroutine get_reshape_indices
 
-  pure function get_face_intervals(n_dim,n_cells) result(n_faces)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer,  dimension(n_dim)             :: n_faces
-    integer, dimension(n_dim) :: tmp
-    integer :: d
-    tmp = n_cells
-    tmp(1) = tmp(1) + 1
-    n_faces = product(tmp)
-    do d = 2,n_dim
-      tmp = n_cells
-      tmp(d) = tmp(d) + 1
-      n_faces(d) = n_faces(d-1) + product(tmp)
-    end do
-  end function get_face_intervals
-
-  pure function get_number_of_faces(n_dim,n_cells) result(n_faces)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer                                :: n_faces
-    integer, dimension(n_dim) :: tmp
-    integer :: d
-    n_faces = 0
-    do d = 1,n_dim
-      tmp = n_cells
-      tmp(d) = tmp(d) + 1
-      n_faces = n_faces + product(tmp)
-    end do
-  end function get_number_of_faces
-
-  pure function get_number_of_interior_faces(n_dim,n_cells) result(n_faces)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer                                :: n_faces
-    integer, dimension(n_dim) :: tmp
-    integer :: d
-    n_faces = 0
-    do d = 1,n_dim
-      tmp = n_cells
-      tmp(d) = tmp(d) - 1
-      n_faces = n_faces + product(tmp)
-    end do
-  end function get_number_of_interior_faces
-
-  pure function get_number_of_boundary_faces(n_dim,n_cells) result(n_faces)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer                                :: n_faces
-    n_faces = get_number_of_faces(n_dim,n_cells) - get_number_of_interior_faces(n_dim,n_cells)
-  end function get_number_of_boundary_faces
-
-  pure subroutine local2global_face(n_dim,n_cells,dir,local_idx,lin_face_idx)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer,                   intent(in)  :: dir
-    integer, dimension(n_dim), intent(in)  :: local_idx
-    integer,                   intent(out) :: lin_face_idx
-    integer, dimension(n_dim+1) :: idx_extents
-    integer, dimension(n_dim) :: nsub
-    idx_extents(1) = 1
-    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
-    nsub = n_cells
-    nsub(dir) = nsub(dir) + 1
-    lin_face_idx = idx_extents(dir) - 1 + local2global(local_idx,nsub)
-  end subroutine local2global_face
-
-  pure subroutine global2local_face(n_dim,n_cells,lin_face_idx,dir,local_idx)
-    integer,                   intent(in)  :: n_dim
-    integer, dimension(n_dim), intent(in)  :: n_cells
-    integer,                   intent(in)  :: lin_face_idx
-    integer,                   intent(out) :: dir
-    integer, dimension(n_dim), intent(out) :: local_idx
-    integer, dimension(n_dim+1) :: idx_extents
-    integer, dimension(n_dim) :: nsub
-    integer, dimension(1) :: loc
-    idx_extents(1) = 1
-    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
-    loc = findloc((lin_face_idx <= idx_extents(2:n_dim)),.true.,back=.true.)
-    dir = loc(1)
-    nsub = n_cells
-    nsub(dir) = nsub(dir) + 1
-    local_idx = global2local( lin_face_idx-idx_extents(dir)+1,nsub)
-  end subroutine global2local_face
-
-  pure subroutine enumerate_faces(n_dim,n_cells,faces)
-    integer,                   intent(in) :: n_dim
-    integer, dimension(n_dim), intent(in) :: n_cells
-    integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
-    integer, dimension(n_dim) :: cell_idx, face_sz, face_idx
-    integer :: cnt, d, n
-    do n = 1,product(n_cells)
-      cell_idx = global2local(n,n_cells)
-      cnt = 0
-      do d = 1,n_dim
-        face_sz = n_cells
-        face_sz(d) = face_sz(d) + 1
-
-        cnt = cnt + 1
-        face_idx = cell_idx + 1
-        face_idx(d) = face_idx(d) - 1 ! lo face
-        faces(cnt,n) = local2global(face_idx,face_sz)
-
-        cnt = cnt + 1
-        face_idx = cell_idx
-        face_idx(d) = face_idx(d) + 1 ! hi face
-        faces(cnt,n) = local2global(face_idx,face_sz)
-      end do
-    end do
-  end subroutine enumerate_faces
-
-  pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
-    integer, intent(in) :: n_dim
-    integer, dimension(n_dim), intent(in) :: n_cells
-    integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
-    integer, dimension(n_dim), intent(in) :: cell_idx
-    integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
-    integer, dimension(n_dim) :: face_sz
-
-    integer :: cnt, dir, n, cell_idx_linear
-    cell_idx_linear = local2global(cell_idx,n_cells)
-    cnt = 0
-    do n = 1,2*n_dim
-      cnt = cnt + 1
-      dir = (n-1)/2 + 1 ! direction
-      face_idxs(1,cnt) = dir
-      face_sz = n_cells
-      face_sz(dir) = face_sz(dir) + 1
-      face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
-    end do
-  end subroutine fetch_faces
-
-  
 end module index_conversion
 
 module reshape_array
@@ -3322,30 +3347,63 @@ contains
 
 end module test_problem
 
+! program main
+!   use set_precision, only : dp
+!   use set_constants, only : zero, one
+!   use test_problem,  only : setup_grid_and_rec
+!   use grid_derived_type, only : grid_type
+!   use var_rec_derived_type, only : var_rec_t
+!   use timer_derived_type, only : basic_timer_t
+
+!   implicit none
+
+!   type(grid_type) :: grid
+!   type(var_rec_t) :: rec
+!   type(basic_timer_t) :: timer
+!   integer :: degree, n_vars, n_dim
+!   integer, dimension(3) :: n_nodes, n_ghost
+
+!   degree  = 1
+!   n_vars  = 1
+!   n_dim   = 3
+!   n_nodes = [11,11,11]
+!   n_ghost = [2,2,2]
+!   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+
+!   write(*,*) 'Here'
+!   call rec%destroy()
+!   call grid%destroy()
+! end program main
+
+
 program main
   use set_precision, only : dp
-  use set_constants, only : zero, one
-  use test_problem,  only : setup_grid_and_rec
-  use grid_derived_type, only : grid_type
-  use var_rec_derived_type, only : var_rec_t
-  use timer_derived_type, only : basic_timer_t
+  use index_conversion, only : z_indexer, get_number_of_faces
+  use index_conversion, only : global2local_face
 
   implicit none
 
-  type(grid_type) :: grid
-  type(var_rec_t) :: rec
-  type(basic_timer_t) :: timer
-  integer :: degree, n_vars, n_dim
-  integer, dimension(3) :: n_nodes, n_ghost
-
-  degree  = 1
-  n_vars  = 1
+  type(z_indexer) :: z_ind
+  integer :: i, j, k, n_faces, n_dim, dir
+  integer, dimension(3) :: n_cells, idx
+  integer, dimension(:), allocatable :: face_idx
+  ! integer, dimension(:,:), allocatable :: faces
   n_dim   = 3
-  n_nodes = [11,11,11]
-  n_ghost = [2,2,2]
-  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+  n_cells = [5,5,5]
+  n_faces = get_number_of_faces(3,n_cells)
 
+  allocate(face_idx(n_faces))
+  ! allocate(faces(1+n_dim,n_faces))
+  z_ind = z_indexer()
+
+  call z_ind%generate_face_idx_order(n_dim,n_cells,face_idx)
+
+  do i = 1,6
+    call global2local_face(n_dim,n_cells,face_idx(i),dir,idx)
+    write(*,*) face_idx(i), dir, idx
+  end do
   write(*,*) 'Here'
-  call rec%destroy()
-  call grid%destroy()
+
+  deallocate(face_idx)
+
 end program main
