@@ -1,9 +1,10 @@
 module set_precision
-  use iso_fortran_env, only : real64
+  use iso_fortran_env, only : real64, int64
   implicit none
   private
-  public :: dp
+  public :: dp, i8
   integer, parameter :: dp  = real64
+  integer, parameter :: i8  = int64
 end module set_precision
 
 module set_constants
@@ -294,6 +295,76 @@ end function get_time
 
 end module timer_derived_type
 
+module quick_sort
+  implicit none
+  private
+  public :: qsort_i8_1D
+contains
+  recursive subroutine qsort_i8_1D( m, A, indx )
+    use set_precision, only : i8
+    integer(i8),               intent(in)    :: m
+    integer(i8), dimension(m), intent(inout) :: A
+    integer(i8), dimension(m), intent(inout) :: indx
+    integer(i8) :: iq
+    if ( m > 1 ) then
+      call partition_i8_1D( m, A, indx, iq )
+      call qsort_i8_1D( iq-1  , A(1:iq-1), indx(1:iq-1) )
+      call qsort_i8_1D( m-iq+1, A(iq:m)  , indx(iq:m)   )
+    end if
+  end subroutine qsort_i8_1D
+  subroutine partition_i8_1D( m, A, indx, marker )
+    use set_precision, only : i8
+    integer(i8),               intent(in)    :: m
+    integer(i8), dimension(m), intent(inout) :: A
+    integer(i8), dimension(m), intent(inout) :: indx
+    integer(i8),               intent(out)   :: marker
+    integer :: return_val
+    integer(i8) :: i, j
+    integer(i8) :: temp_indx
+    integer(i8) :: x, temp_A
+    x = A(1)
+    i = 0
+    j = m+1
+    do
+      do
+        j = j-1
+        return_val = compare_i8_1D( A(j), x )
+        if ( return_val == -1 .or. return_val == 0 ) exit
+      end do
+      do
+        i = i+1
+        return_val = compare_i8_1D( A(i), x )
+        if ( return_val == +1 .or. return_val == 0 ) exit
+      end do
+      if ( i < j ) then
+        temp_A    = A(i)
+        temp_indx = indx(i)
+        A(i)      = A(j)
+        indx(i)   = indx(j)
+        A(j)      = temp_A
+        indx(j)   = temp_indx
+      elseif ( i == j ) then
+        marker = i+1
+        return
+      else
+        marker = i
+        return
+      end if
+    end do
+  end subroutine partition_i8_1D
+  pure elemental function compare_i8_1D( a, b ) result( comparison )
+    use set_precision, only : i8
+    integer(i8), intent(in) :: a, b
+    integer                 :: comparison
+    comparison = 0
+    if ( a < b ) then
+      comparison = -1
+    elseif ( a > b ) then
+      comparison = +1
+    end if
+  end function compare_i8_1D
+end module quick_sort
+
 module index_conversion
   implicit none
   private
@@ -303,13 +374,104 @@ module index_conversion
   public :: get_face_idx_from_id
   public :: get_reshape_indices
   public :: get_number_of_faces, enumerate_faces, fetch_faces
-  public :: num_interior_faces, num_boundary_faces, num_total_faces
+  public :: get_number_of_interior_faces, get_number_of_boundary_faces
+  public :: global2local_face, local2global_face
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
     module procedure cell_face_nbors_sub
   end interface cell_face_nbors
+  
+  type z_indexer
+    private
+    integer(kind=8), dimension (0:1023) :: morton_table
+  contains
+    private
+    procedure, public, pass :: pos_to_z
+    procedure, public, pass :: generate_face_idx_order
+  end type z_indexer
+
+  interface z_indexer
+    module procedure constructor
+  end interface z_indexer
 contains
+
+  pure elemental function constructor() result(this)
+    type(z_indexer) :: this
+    integer :: b, v, z
+    do v=0, 1023
+        z = 0
+        do b=0, 9
+            call mvbits(v,b,1,z,3*b)
+        end do
+        this%morton_table(v) = z
+    end do
+  end function constructor
+
+  pure elemental function pos_to_z( this, i, j, k) result(zval)
+    use set_precision, only : i8
+    class(z_indexer), intent(in) :: this
+    integer, intent(in) :: i, j, k
+    integer(i8) :: zval
+    integer(i8) :: z, ii, jj, kk
+    integer(i8), parameter :: sz = 1023
+    ii = i-1
+    jj = j-1
+    kk = k-1
+    z = this%morton_table(iand(kk, sz))
+    z = z + ishft(this%morton_table(iand(jj, sz)),1)
+    z = z + ishft(this%morton_table(iand(ii, sz)),2)
+    z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),30)
+    z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
+    zval = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),32) + 1
+  end function pos_to_z
+
+  subroutine generate_face_idx_order(this,n_dim,n_cells,face_idx)
+    use set_precision, only : i8
+    use quick_sort, only : qsort_i8_1D
+    class(z_indexer),      intent(in) :: this
+    integer,               intent(in) :: n_dim
+    integer, dimension(3), intent(in) :: n_cells
+    integer, dimension(get_number_of_faces(3,n_cells)), intent(out) :: face_idx
+    integer(i8), dimension(get_number_of_faces(3,n_cells)) :: indx, A
+    integer, dimension(3) :: sz_tmp
+    integer :: n_faces
+    integer :: i, j, k, cnt
+
+    n_faces = get_number_of_faces(n_dim,n_cells(1:n_dim))
+    sz_tmp = n_cells
+    sz_tmp(1:n_dim) = 2*n_cells(1:n_dim)
+
+    cnt = 0
+    do k = 2,sz_tmp(3),2
+      do j = 2,sz_tmp(2),2
+        do i = 1,sz_tmp(1),2
+          cnt = cnt + 1
+          A(cnt) = this%pos_to_z(i,j,k)
+        end do
+      end do
+    end do
+
+    do k = 2,sz_tmp(3),2
+      do j = 1,sz_tmp(2),2
+        do i = 2,sz_tmp(1),2
+          cnt = cnt + 1
+          A(cnt) = this%pos_to_z(i,j,k)
+        end do
+      end do
+    end do
+
+    do k = 1,sz_tmp(3),2
+      do j = 2,sz_tmp(2),2
+        do i = 2,sz_tmp(1),2
+          cnt = cnt + 1
+          A(cnt) = this%pos_to_z(i,j,k)
+        end do
+      end do
+    end do
+    call qsort_i8_1D(int(n_faces,i8),A,indx)
+    face_idx = int(indx)
+  end subroutine generate_face_idx_order
   
   pure function global2local(iG,nSub) result(iSub)
     integer,               intent(in) :: iG
@@ -489,45 +651,89 @@ contains
 
   end subroutine get_reshape_indices
 
-  pure subroutine get_number_of_faces(n_dim,n_cells,n_interior,n_boundary)
+  pure function get_face_intervals(n_dim,n_cells) result(n_faces)
     integer,                   intent(in)  :: n_dim
     integer, dimension(n_dim), intent(in)  :: n_cells
-    integer,                   intent(out) :: n_interior, n_boundary
-    integer, dimension(n_dim) :: n_faces
-    integer :: n_total, d
-    n_total = 0
-    n_interior = 0
-    do d = 1,n_dim
-      n_faces = n_cells
-      n_faces(d) = n_faces(d) + 1
-      n_total = n_total + product(n_faces)
-      n_faces(d) = n_faces(d) - 2
-      n_interior = n_interior + product(n_faces)
+    integer,  dimension(n_dim)             :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    tmp = n_cells
+    tmp(1) = tmp(1) + 1
+    n_faces = product(tmp)
+    do d = 2,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) + 1
+      n_faces(d) = n_faces(d-1) + product(tmp)
     end do
-    n_boundary = n_total - n_interior
-  end subroutine get_number_of_faces
+  end function get_face_intervals
 
-  pure function num_total_faces(n_cells) result(n_faces)
-    integer, dimension(:), intent(in) :: n_cells
-    integer                           :: n_faces
-    integer :: n_interior, n_boundary
-    call get_number_of_faces(size(n_cells),n_cells,n_interior,n_boundary)
-    n_faces = n_interior + n_boundary
-  end function num_total_faces
+  pure function get_number_of_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    n_faces = 0
+    do d = 1,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) + 1
+      n_faces = n_faces + product(tmp)
+    end do
+  end function get_number_of_faces
 
-  pure function num_interior_faces(n_cells) result(n_faces)
-    integer, dimension(:), intent(in) :: n_cells
-    integer                           :: n_faces
-    integer :: junk
-    call get_number_of_faces(size(n_cells),n_cells,n_faces,junk)
-  end function num_interior_faces
+  pure function get_number_of_interior_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    integer, dimension(n_dim) :: tmp
+    integer :: d
+    n_faces = 0
+    do d = 1,n_dim
+      tmp = n_cells
+      tmp(d) = tmp(d) - 1
+      n_faces = n_faces + product(tmp)
+    end do
+  end function get_number_of_interior_faces
 
-  pure function num_boundary_faces(n_cells) result(n_faces)
-    integer, dimension(:), intent(in) :: n_cells
-    integer                           :: n_faces
-    integer :: junk
-    call get_number_of_faces(size(n_cells),n_cells,junk,n_faces)
-  end function num_boundary_faces
+  pure function get_number_of_boundary_faces(n_dim,n_cells) result(n_faces)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer                                :: n_faces
+    n_faces = get_number_of_faces(n_dim,n_cells) - get_number_of_interior_faces(n_dim,n_cells)
+  end function get_number_of_boundary_faces
+
+  pure subroutine local2global_face(n_dim,n_cells,dir,local_idx,lin_face_idx)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer,                   intent(in)  :: dir
+    integer, dimension(n_dim), intent(in)  :: local_idx
+    integer,                   intent(out) :: lin_face_idx
+    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: nsub
+    idx_extents(1) = 1
+    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
+    nsub = n_cells
+    nsub(dir) = nsub(dir) + 1
+    lin_face_idx = idx_extents(dir) - 1 + local2global(local_idx,nsub)
+  end subroutine local2global_face
+
+  pure subroutine global2local_face(n_dim,n_cells,lin_face_idx,dir,local_idx)
+    integer,                   intent(in)  :: n_dim
+    integer, dimension(n_dim), intent(in)  :: n_cells
+    integer,                   intent(in)  :: lin_face_idx
+    integer,                   intent(out) :: dir
+    integer, dimension(n_dim), intent(out) :: local_idx
+    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: nsub
+    integer, dimension(1) :: loc
+    idx_extents(1) = 1
+    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
+    loc = findloc((lin_face_idx <= idx_extents(2:n_dim)),.true.,back=.true.)
+    dir = loc(1)
+    nsub = n_cells
+    nsub(dir) = nsub(dir) + 1
+    local_idx = global2local( lin_face_idx-idx_extents(dir)+1,nsub)
+  end subroutine global2local_face
 
   pure subroutine enumerate_faces(n_dim,n_cells,faces)
     integer,                   intent(in) :: n_dim
@@ -575,6 +781,8 @@ contains
       face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
     end do
   end subroutine fetch_faces
+
+  
 end module index_conversion
 
 module reshape_array
@@ -1871,6 +2079,7 @@ module grid_derived_type
 
   public :: pack_cell_node_coords
   public :: get_face_quad_ptrs
+  public :: pack_quadrature_info
 
   type derived_grid_vars
     real(dp),       allocatable, dimension(:,:,:,:) :: cell_c
@@ -1923,6 +2132,33 @@ module grid_derived_type
   end type grid_type
 
 contains
+
+  subroutine pack_quadrature_info(gblock,n_quad,n_faces,quad_wts,quad_pts)
+    use set_constants,    only : zero
+    use index_conversion, only : get_number_of_faces
+    type(grid_block), intent(in) :: gblock
+    integer,          intent(in) :: n_quad, n_faces
+    real(dp), dimension(n_quad,n_faces),   intent(out) :: quad_wts
+    real(dp), dimension(3,n_quad,n_faces), intent(out) :: quad_pts
+    integer :: d, i,j,k,cnt
+    integer, dimension(3) :: offset
+    quad_pts = zero
+    quad_wts = zero
+    cnt = 0
+    do d = 1,gblock%n_dim
+      offset = 0
+      offset(d) = 1
+      do k = 1,gblock%n_cells(3)+offset(3)
+        do j = 1,gblock%n_cells(2)+offset(2)
+          do i = 1,gblock%n_cells(1)+offset(1)
+            cnt = cnt + 1
+            quad_wts(:,cnt) = gblock%grid_vars%face_quads(d)%p(i,j,k)%quad_wts
+            quad_pts(:,:,cnt) = gblock%grid_vars%face_quads(d)%p(i,j,k)%quad_pts
+          end do
+        end do
+      end do
+    end do
+  end subroutine pack_quadrature_info
 
   pure function pack_cell_node_coords(idx,bnd_min,bnd_max,coords_in) result(coords_out)
   integer, dimension(3),                            intent(in)  :: idx, bnd_min, bnd_max
@@ -2026,13 +2262,14 @@ contains
     hi(1:this%n_dim) = this%n_cells(1:this%n_dim) + this%n_ghost(1:this%n_dim)
     allocate( this%volume(    lo(1):hi(1), lo(2):hi(2), lo(3):hi(3) ) )
     allocate( this%cell_c( 3, lo(1):hi(1), lo(2):hi(2), lo(3):hi(3) ) )
-    allocate( this%quad(      lo(1):hi(1), lo(2):hi(2), lo(3):hi(3) ) )
+    ! allocate( this%quad(      lo(1):hi(1), lo(2):hi(2), lo(3):hi(3) ) )
     this%volume = zero
     this%cell_c = zero
 
     lo = 1
     hi = 1
     hi(1:this%n_dim) = this%n_cells(1:this%n_dim)
+    allocate( this%quad(      lo(1):hi(1), lo(2):hi(2), lo(3):hi(3) ) )
     allocate( this%xi_area(   lo(1):hi(1)+1, lo(2):hi(2),   lo(3):hi(3)   ) )
     allocate( this%eta_area(  lo(1):hi(1),   lo(2):hi(2)+1, lo(3):hi(3)   ) )
     allocate( this%zeta_area( lo(1):hi(1),   lo(2):hi(2),   lo(3):hi(3)+1 ) )
@@ -2598,12 +2835,11 @@ module var_rec_derived_type
     real(dp), dimension(:,:,:),   allocatable :: A_inv_RHS
     real(dp), dimension(:,:,:),   allocatable :: A, D
     real(dp), dimension(:,:,:,:), allocatable :: B, C
-    type(monomial_basis_t)                    :: mono_basis
-    integer, pointer :: total_degree
-    integer, pointer :: n_dim
-    integer, pointer :: n_terms
-    integer, pointer, dimension(:)   :: idx
-    integer, pointer, dimension(:,:)   :: exponents
+    ! type(monomial_basis_t)                    :: mono_basis
+    integer :: total_degree
+    integer :: n_dim
+    integer :: n_terms
+    integer, dimension(:,:), allocatable :: exponents
   contains
     private
     ! procedure, public, pass :: eval => evaluate_reconstruction
@@ -2622,30 +2858,33 @@ contains
   function constructor( gblock, n_vars, mono_basis ) result(this)
     use set_constants, only : zero
     use math,             only : maximal_extents
-    use index_conversion, only : num_total_faces, global2local
-    use grid_derived_type, only : grid_block, pack_cell_node_coords
+    use index_conversion, only : get_number_of_faces, global2local
+    use grid_derived_type, only : grid_block, pack_cell_node_coords, pack_quadrature_info
     type(grid_block), intent(in) :: gblock
     integer,          intent(in) :: n_vars
     type(monomial_basis_t), intent(in) :: mono_basis
     type(var_rec_t), target :: this
     integer :: i, n
+    integer :: n_quad_volume
     integer, dimension(gblock%n_dim) :: cell_idx
     integer, dimension(3) :: tmp_idx
     real(dp), dimension(3,8) :: nodes
     real(dp), dimension(:,:), allocatable :: t_quad_pts
     call this%destroy()
-    this%mono_basis    = mono_basis
-    this%total_degree => this%mono_basis%total_degree
-    this%n_dim        => this%mono_basis%n_dim
-    this%n_terms      => this%mono_basis%n_terms
-    this%idx          => this%mono_basis%idx
-    this%exponents    => this%mono_basis%exponents
-    this%n_quad  = maxval(gblock%grid_vars%quad%n_quad)
+    this%total_degree = mono_basis%total_degree
+    this%n_dim        = mono_basis%n_dim
+    this%n_terms      = mono_basis%n_terms
+    allocate(this%exponents(this%n_dim,this%n_terms) )
+    this%exponents    = mono_basis%exponents
+    this%n_quad  = max( maxval(gblock%grid_vars%xi_face_quad%n_quad), &
+                        maxval(gblock%grid_vars%eta_face_quad%n_quad), &
+                        maxval(gblock%grid_vars%zeta_face_quad%n_quad) )
     this%n_cells = product(gblock%n_cells)
-    this%n_faces = num_total_faces(gblock%n_cells)
+    this%n_faces = get_number_of_faces(this%n_dim,gblock%n_cells)
     this%n_vars  = n_vars
 
-    allocate(t_quad_pts(this%n_dim,this%n_quad))
+    n_quad_volume = maxval(gblock%grid_vars%quad%n_quad)
+    allocate(t_quad_pts(this%n_dim,n_quad_volume))
     t_quad_pts = zero
 
     allocate( this%nbor_idx( 2*this%n_dim, this%n_cells ) )
@@ -2665,6 +2904,8 @@ contains
     this%coefs   = zero
     this%quad_wts = zero
     this%quad_pts = zero
+
+    call pack_quadrature_info(gblock,this%n_quad,this%n_faces,this%quad_wts,this%quad_pts)
     do i = 1,this%n_cells
       cell_idx = global2local(i,gblock%n_cells)
       tmp_idx = 1
@@ -2673,11 +2914,11 @@ contains
       this%h_ref(:,i) = maximal_extents(gblock%n_dim, 8, nodes )
       associate( quad => gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)) )
         this%x_ref(:,i) = quad%integrate( this%n_dim, quad%quad_pts(1:this%n_dim,:) ) / sum( quad%quad_wts )
-        t_quad_pts = transform_points(this%n_dim,this%n_quad,quad%quad_pts,this%x_ref(:,i),this%h_ref(:,i))
-        this%moments(:,i) = compute_grid_moments(gblock%n_dim,this%n_terms,this%n_quad,this%exponents,t_quad_pts,quad%quad_wts)
+        t_quad_pts = transform_points(this%n_dim,n_quad_volume,quad%quad_pts,this%x_ref(:,i),this%h_ref(:,i))
+        this%moments(:,i) = compute_grid_moments(gblock%n_dim,this%n_terms,n_quad_volume,this%exponents,t_quad_pts,quad%quad_wts)
       end associate
       ! get neighbors, get idxs, copy over quadrature points
-      end do
+    end do
   end function constructor
 
   pure elemental subroutine destroy_var_rec_t( this )
@@ -2691,17 +2932,14 @@ contains
     if (allocated(this%coefs) ) deallocate( this%coefs )
     if (allocated(this%quad_wts) ) deallocate( this%quad_wts )
     if (allocated(this%quad_pts) ) deallocate( this%quad_pts )
-    this%total_degree => null()
-    this%n_dim        => null()
-    this%n_terms      => null()
-    this%idx          => null()
-    this%exponents    => null()
-    call this%mono_basis%destroy()
-    this%n_quad = 0
-    this%n_cells = 0
-    this%n_faces = 0
-    this%n_vars = 0
-
+    if (allocated(this%exponents) ) deallocate( this%exponents )
+    this%total_degree = 0
+    this%n_dim        = 0
+    this%n_terms      = 0
+    this%n_quad       = 0
+    this%n_cells      = 0
+    this%n_faces      = 0
+    this%n_vars       = 0
   end subroutine destroy_var_rec_t
     
   pure subroutine evaluate_monomial(n_dim,e,x,val,coef)
@@ -2763,6 +3001,7 @@ contains
     real(dp), dimension(n_term)                   :: moments
     real(dp)       :: tmp_val
     integer :: m, n, coef
+    moments = zero
     do m = 1,n_term
       do n = 1,n_quad
         call evaluate_monomial(n_dim,exponents(:,m),t_quad_pts(:,n),tmp_val,coef)
@@ -3041,7 +3280,7 @@ module test_problem
   use set_precision, only : dp
   implicit none
   private
-  public :: setup_grid
+  public :: setup_grid_and_rec
 contains
 
   pure function test_function_1(n_var,x) result(val)
@@ -3061,153 +3300,52 @@ contains
     ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
   end function test_function_2
 
-  subroutine setup_grid( n_dim, n_nodes, n_ghost, grid )
+  subroutine setup_grid_and_rec( n_dim, n_var, degree, n_nodes, n_ghost, grid, rec )
     use grid_derived_type, only : grid_type
+    use var_rec_derived_type, only : var_rec_t
+    use monomial_basis_derived_type, only : monomial_basis_t
     use linspace_helper,   only : unit_cartesian_mesh_cat
-    integer,                     intent(in)  :: n_dim
+    integer,                     intent(in)  :: n_dim, n_var, degree
     integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
     type(grid_type),             intent(out) :: grid
+    type(var_rec_t),             intent(out) :: rec
+
+    
 
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
-  end subroutine setup_grid
+
+    rec = var_rec_t(grid%gblock(1), n_var, monomial_basis_t( degree, n_dim ) )
+  end subroutine setup_grid_and_rec
 
 end module test_problem
 
 program main
   use set_precision, only : dp
-  use set_constants, only : zero, large
-  use index_conversion, only : get_number_of_faces, enumerate_faces, fetch_faces
-  use index_conversion, only : global2local
-  use math, only : rand_int_in_range
+  use set_constants, only : zero, one
+  use test_problem,  only : setup_grid_and_rec
+  use grid_derived_type, only : grid_type
+  use var_rec_derived_type, only : var_rec_t
   use timer_derived_type, only : basic_timer_t
 
   implicit none
+
+  type(grid_type) :: grid
+  type(var_rec_t) :: rec
   type(basic_timer_t) :: timer
-  integer :: n_dim, n_interior, n_boundary
-  integer :: num_cells, cell_idx_linear
-  integer, dimension(3) :: n_nodes, n_cells, cell_idx
-  integer, dimension(:,:), allocatable :: faces
-  integer, dimension(:,:), allocatable :: face_idxs
-  integer :: j, n, N_repeat
-  real(dp) :: t, avg_t, min_t, max_t
-  real(dp) :: avg_t_avg, avg_t_min, avg_t_max
-  real(dp) :: min_t_avg, min_t_min, min_t_max
-  real(dp) :: max_t_avg, max_t_min, max_t_max
+  integer :: degree, n_vars, n_dim
+  integer, dimension(3) :: n_nodes, n_ghost
 
+  degree  = 1
+  n_vars  = 1
   n_dim   = 3
-  n_nodes = [101,101,101]
-  n_cells = n_nodes - 1
-  num_cells = product( n_cells )
+  n_nodes = [11,11,11]
+  n_ghost = [2,2,2]
+  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
 
-  allocate( faces(2*n_dim,product(n_cells)) )
-  allocate( face_idxs(n_dim+1,2*n_dim) )
-  call enumerate_faces(n_dim,n_cells,faces)
-
-
-  ! cell_idx = [1,1,1]
-  ! call fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
-  ! write(*,*) cell_idx
-  ! write(*,*)
-  ! do n = 1,2*n_dim
-  !   write(*,*) face_idxs(:,n)
-  ! end do
-
-  ! call get_number_of_faces(n_dim,n_cells(1:n_dim),n_interior,n_boundary)
-  ! write(*,*) n_cells
-  ! write(*,*) product(n_cells)
-  ! write(*,*) n_interior
-  ! write(*,*) n_boundary
-
-  N_repeat = 10
-  
-
-  avg_t_avg = zero
-  avg_t_min = large
-  avg_t_max = zero
-
-  min_t_avg = zero
-  min_t_min = large
-  min_t_max = zero
-
-  max_t_avg = zero
-  max_t_min = large
-  max_t_max = zero
-
-  do j = 1,N_repeat
-    avg_t = zero
-    min_t = large
-    max_t = zero
-    do n = 1,num_cells
-      cell_idx  = 0
-      face_idxs = 0
-      cell_idx_linear = rand_int_in_range(1,num_cells)
-      cell_idx = global2local(cell_idx_linear,n_cells)
-      call timer%tic()
-      call fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
-      t = timer%toc()
-      min_t = min(min_t,t)
-      max_t = max(max_t,t)
-      avg_t = avg_t + t
-    end do
-    avg_t = avg_t / real(num_cells,dp)
-
-    avg_t_avg = avg_t_avg + avg_t
-    avg_t_min = min(avg_t_min,avg_t)
-    avg_t_max = max(avg_t_max,avg_t)
-
-    min_t_avg = min_t_avg + min_t
-    min_t_min = min(min_t_min,min_t)
-    min_t_max = max(min_t_max,min_t)
-
-    max_t_avg = max_t_avg + max_t
-    max_t_min = min(max_t_min,max_t)
-    max_t_max = max(max_t_max,max_t)
-  end do
-
-  avg_t_avg = avg_t_avg / real(N_repeat,dp)
-  min_t_avg = min_t_avg / real(N_repeat,dp)
-  max_t_avg = max_t_avg / real(N_repeat,dp)
-
-  write(*,*) 'Average Average time: ', avg_t_avg
-  write(*,*) 'Minimum Average time: ', avg_t_min
-  write(*,*) 'Maximum Average time: ', avg_t_max
-  write(*,*)
-  write(*,*) 'Average Minimum time: ', min_t_avg
-  write(*,*) 'Minimum Minimum time: ', min_t_min
-  write(*,*) 'Maximum Minimum time: ', min_t_max
-  write(*,*)
-  write(*,*) 'Average Maximum time: ', max_t_avg
-  write(*,*) 'Minimum Maximum time: ', max_t_min
-  write(*,*) 'Maximum Maximum time: ', max_t_max
-  write(*,*)
-
-  deallocate( faces, face_idxs )
+  write(*,*) 'Here'
+  call rec%destroy()
+  call grid%destroy()
 end program main
-
-! program main
-!   use set_precision, only : dp
-!   use set_constants, only : zero, one
-!   use test_problem,  only : setup_grid
-!   use grid_derived_type, only : grid_type
-!   use timer_derived_type, only : basic_timer_t
-
-!   implicit none
-
-!   type(grid_type) :: grid
-!   type(basic_timer_t) :: timer
-!   integer :: degree, n_vars, n_dim
-!   integer, dimension(3) :: n_nodes, n_ghost
-
-!   degree  = 1
-!   n_vars  = 1
-!   n_dim   = 3
-!   n_nodes = [11,11,11]
-!   n_ghost = [2,2,2]
-!   call setup_grid( n_dim, n_nodes, n_ghost, grid )
-
-!   write(*,*) 'Here'
-!   call grid%destroy()
-! end program main
