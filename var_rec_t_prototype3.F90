@@ -1,9 +1,10 @@
 module set_precision
-  use iso_fortran_env, only : real64, int64
+  use iso_fortran_env, only : real64, int32, int64
   implicit none
   private
-  public :: dp, i8
+  public :: dp, i4, i8
   integer, parameter :: dp  = real64
+  integer, parameter :: i4  = int32
   integer, parameter :: i8  = int64
 end module set_precision
 
@@ -300,7 +301,7 @@ module quick_sort
   private
   public :: qsort_i8_1D
 contains
-  recursive subroutine qsort_i8_1D( m, A, indx )
+  pure recursive subroutine qsort_i8_1D( m, A, indx )
     use set_precision, only : i8
     integer(i8),               intent(in)    :: m
     integer(i8), dimension(m), intent(inout) :: A
@@ -312,7 +313,7 @@ contains
       call qsort_i8_1D( m-iq+1, A(iq:m)  , indx(iq:m)   )
     end if
   end subroutine qsort_i8_1D
-  subroutine partition_i8_1D( m, A, indx, marker )
+  pure subroutine partition_i8_1D( m, A, indx, marker )
     use set_precision, only : i8
     integer(i8),               intent(in)    :: m
     integer(i8), dimension(m), intent(inout) :: A
@@ -330,11 +331,13 @@ contains
         j = j-1
         return_val = compare_i8_1D( A(j), x )
         if ( return_val == -1 .or. return_val == 0 ) exit
+        ! if ( A(j) <= x ) exit
       end do
       do
         i = i+1
         return_val = compare_i8_1D( A(i), x )
         if ( return_val == +1 .or. return_val == 0 ) exit
+        ! if ( A(j) >= x ) exit
       end do
       if ( i < j ) then
         temp_A    = A(i)
@@ -352,6 +355,7 @@ contains
       end if
     end do
   end subroutine partition_i8_1D
+
   pure elemental function compare_i8_1D( a, b ) result( comparison )
     use set_precision, only : i8
     integer(i8), intent(in) :: a, b
@@ -364,6 +368,75 @@ contains
     end if
   end function compare_i8_1D
 end module quick_sort
+
+module sort_unique
+  use set_precision, only : i4, i8
+  implicit none
+  private
+  public :: unique, count_unique
+
+  interface unique
+    module procedure unique_i4
+    module procedure unique_i8
+  end interface unique
+
+  interface count_unique
+    module procedure count_unique_i4
+    module procedure count_unique_i8
+  end interface count_unique
+contains
+
+  pure subroutine unique_i8(list,unique_list,n_unique)
+    use quick_sort, only : qsort_i8_1D
+    !! usage sortedlist=Unique(list)
+    integer(i8), dimension(:),          intent(in) :: list
+    integer(i8), dimension(size(list)), intent(out) :: unique_list
+    integer(i8),                        intent(out) :: n_unique
+    integer(i8), dimension(size(list)) :: tmp_list, idx
+    logical,     dimension(size(list)) :: mask
+    integer(i8) :: i, N
+    ! sort
+    tmp_list = list
+    N=size(list)
+    call qsort_i8_1D( N, tmp_list, idx )
+
+    ! cull duplicate indices
+    mask = .false.
+    mask(1:N-1) = ( tmp_list(1:N-1)==tmp_list(2:N) )
+    unique_list = 0
+    n_unique = count(.not.mask)
+    unique_list(1:n_unique) = pack(tmp_list,.not.mask)
+  end subroutine unique_i8
+
+  pure function count_unique_i8(list)
+    integer(i8), dimension(:), intent(in) :: list
+    integer(i8), dimension(size(list)) :: unique_list
+    integer(i8) :: count_unique_i8
+    call unique_i8( list, unique_list, count_unique_i8 )
+  end function count_unique_i8
+
+  pure subroutine unique_i4(list,unique_list,n_unique)
+    use quick_sort, only : qsort_i8_1D
+    !! usage sortedlist=Unique(list)
+    integer(i4), dimension(:),          intent(in) :: list
+    integer(i4), dimension(size(list)), intent(out) :: unique_list
+    integer(i4),                        intent(out) :: n_unique
+    integer(i8), dimension(size(list)) :: tmp_list, unique_list_i8
+    logical,     dimension(size(list)) :: mask
+    integer(i8) :: n_unique_i8
+    call unique_i8( int(list,i8), unique_list_i8, n_unique_i8 )
+    unique_list = int(unique_list_i8,i4)
+    n_unique    = int( n_unique, i4)
+  end subroutine unique_i4
+
+  pure function count_unique_i4(list)
+    integer(i4), dimension(:), intent(in) :: list
+    integer(i4), dimension(size(list)) :: unique_list
+    integer(i4) :: count_unique_i4
+    call unique_i4( list, unique_list, count_unique_i4 )
+  end function count_unique_i4
+
+end module sort_unique
 
 module index_conversion
   implicit none
@@ -389,7 +462,7 @@ module index_conversion
     integer(kind=8), dimension (0:1023) :: morton_table
   contains
     private
-    procedure, public, pass :: pos_to_z
+    procedure, public, pass :: pos_to_z, pos_to_z_alt
     procedure, public, pass :: generate_face_idx_order
   end type z_indexer
 
@@ -410,47 +483,90 @@ contains
     end do
   end function constructor
 
-  pure elemental function pos_to_z( this, i, j, k) result(zval)
+  pure elemental function pos_to_z_alt( this, i, j, k) result(z)
     use set_precision, only : i8
     class(z_indexer), intent(in) :: this
     integer, intent(in) :: i, j, k
-    integer(i8) :: zval
-    integer(i8) :: z, ii, jj, kk
+    integer(i8) :: z
+    integer(i8) :: b, ii, jj, kk
+    ii = i-1
+    jj = j-1
+    kk = k-1
+
+    z = 0
+    do b=0, 19
+      ! call mvbits(kk,b,1,z,3*b+2)
+      ! call mvbits(ii,b,1,z,3*b+1)
+      ! call mvbits(jj,b,1,z,3*b  )
+      call mvbits(ii,b,1,z,3*b+2)
+      call mvbits(jj,b,1,z,3*b+1)
+      call mvbits(kk,b,1,z,3*b  )
+    end do
+
+    z = z+1
+
+  end function pos_to_z_alt
+
+  pure elemental function pos_to_z( this, i, j, k) result(z)
+    use set_precision, only : i8
+    class(z_indexer), intent(in) :: this
+    integer, intent(in) :: i, j, k
+    integer(i8) :: z
+    integer(i8) :: ii, jj, kk
     integer(i8), parameter :: sz = 1023
     ii = i-1
     jj = j-1
     kk = k-1
-    z = this%morton_table(iand(kk, sz))
-    z = z + ishft(this%morton_table(iand(jj, sz)),1)
-    z = z + ishft(this%morton_table(iand(ii, sz)),2)
-    z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),30)
+
+    ! z =           this%morton_table(iand(      kk,      sz))
+    ! z = z + ishft(this%morton_table(iand(      jj,      sz)),1)
+    ! z = z + ishft(this%morton_table(iand(      ii,      sz)),2)
+    ! z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),30)
+    ! z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
+    ! z = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),32) + 1
+
+    z =           this%morton_table(iand(      ii,      sz))
+    z = z + ishft(this%morton_table(iand(      jj,      sz)),1)
+    z = z + ishft(this%morton_table(iand(      kk,      sz)),2)
+    z = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),30)
     z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
-    zval = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),32) + 1
+    z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),32) + 1
+
+    ! z =           this%morton_table(iand(      kk,      sz))
+    ! z = z + ishft(this%morton_table(iand(      jj,      sz)),1)
+    ! z = z + ishft(this%morton_table(iand(      ii,      sz)),2)
+    ! z = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),30)
+    ! z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
+    ! z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),32) + 1
+
   end function pos_to_z
 
-  subroutine generate_face_idx_order(this,n_dim,n_cells,face_idx)
+  subroutine generate_face_idx_order(this,n_dim,n_cells,n_faces,face_idx)
     use set_precision, only : i8
     use quick_sort, only : qsort_i8_1D
+    use sort_unique, only : count_unique
     class(z_indexer),      intent(in) :: this
     integer,               intent(in) :: n_dim
     integer, dimension(3), intent(in) :: n_cells
-    integer, dimension(get_number_of_faces(3,n_cells)), intent(out) :: face_idx
-    integer(i8), dimension(get_number_of_faces(3,n_cells)) :: indx, A
+    integer,               intent(in) :: n_faces
+    integer, dimension(n_faces,2), intent(out) :: face_idx
+    integer(i8), dimension(n_faces) :: indx1, indx2
     integer, dimension(3) :: sz_tmp
-    integer :: n_faces
     integer :: i, j, k, cnt, tmp1, tmp2
-
-    n_faces = get_number_of_faces(n_dim,n_cells(1:n_dim))
     sz_tmp = n_cells
     sz_tmp(1:n_dim) = 2*n_cells(1:n_dim)
+
+    ! do i = 1,n_faces
+    !   call global2local_face(n_dim,n_cells,i,dir,local_idx)
+    !   indx2(i) = this%pos_to_z_alt(local_idx(1),local_idx(2),local_idx(3))
+    ! end do
 
     cnt = 0
     do k = 2,sz_tmp(3),2
       do j = 2,sz_tmp(2),2
         do i = 1,sz_tmp(1)+1,2
           cnt = cnt + 1
-          ! write(*,*) i,j,k
-          A(cnt) = this%pos_to_z(i,j,k)
+          indx2(cnt) = this%pos_to_z_alt(i,j,k)
         end do
       end do
     end do
@@ -459,23 +575,46 @@ contains
       do j = 1,sz_tmp(2)+1,2
         do i = 2,sz_tmp(1),2
           cnt = cnt + 1
-          A(cnt) = this%pos_to_z(i,j,k)
+          indx2(cnt) = this%pos_to_z_alt(i,j,k)
         end do
       end do
     end do
 
-    do k = 1,sz_tmp(3)+1,2
-      do j = 2,sz_tmp(2),2
-        do i = 2,sz_tmp(1),2
-          cnt = cnt + 1
-          A(cnt) = this%pos_to_z(i,j,k)
+    if (n_dim == 3) then
+      do k = 1,sz_tmp(3)+1,2
+        do j = 2,sz_tmp(2),2
+          do i = 2,sz_tmp(1),2
+            cnt = cnt + 1
+            indx2(cnt) = this%pos_to_z_alt(i,j,k)
+          end do
         end do
       end do
-    end do
-    indx = [(i,i=1,n_faces)]
-    call qsort_i8_1D(int(n_faces,i8),A,indx)
-    face_idx = int(indx)
+    end if
+
+    indx1 = [(i,i=1,n_faces)]
+    call qsort_i8_1D(int(n_faces,i8),indx2,indx1)
+    face_idx(:,1) = int(indx1)
+
+    indx2 = [(i,i=1,n_faces)]
+    call qsort_i8_1D(int(n_faces,i8),indx1,indx2)
+    face_idx(:,2) = int(indx2)
   end subroutine generate_face_idx_order
+
+  subroutine remove_duplicates_unsorted(input,output,n_unique)
+    integer, dimension(:),           intent(in)  :: input
+    integer, dimension(size(input)), intent(out) :: output
+    integer,                         intent(out) :: n_unique
+    integer :: i, n_max
+    n_unique = 1
+    output    = 0
+    output(1) = input(1)
+    n_max = size(input)
+    do i = 2,n_max
+      if (any(output==input(i))) cycle
+      n_unique = n_unique + 1
+      output(n_unique) = input(i)
+    end do
+  end subroutine remove_duplicates_unsorted
   
   pure function global2local(iG,nSub) result(iSub)
     integer,               intent(in) :: iG
@@ -546,19 +685,19 @@ contains
     iG   = local2global(idx,nSub)
   end function local2global_bnd
 
-  pure function get_face_intervals(n_dim,n_cells) result(n_faces)
+  pure function get_face_intervals(n_dim,n_cells) result(intervals)
     integer,                   intent(in)  :: n_dim
     integer, dimension(n_dim), intent(in)  :: n_cells
-    integer,  dimension(n_dim)             :: n_faces
+    integer,  dimension(n_dim)             :: intervals
     integer, dimension(n_dim) :: tmp
     integer :: d
     tmp = n_cells
     tmp(1) = tmp(1) + 1
-    n_faces(1) = product(tmp)
+    intervals(1) = product(tmp)
     do d = 2,n_dim
       tmp = n_cells
       tmp(d) = tmp(d) + 1
-      n_faces(d) = n_faces(d-1) + product(tmp)
+      intervals(d) = intervals(d-1) + product(tmp)
     end do
   end function get_face_intervals
 
@@ -603,13 +742,12 @@ contains
     integer,                   intent(in)  :: dir
     integer, dimension(n_dim), intent(in)  :: local_idx
     integer,                   intent(out) :: lin_face_idx
-    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: idx_extents
     integer, dimension(n_dim) :: nsub
-    idx_extents(1) = 1
-    idx_extents(2:n_dim) = get_face_intervals(n_dim,n_cells)
+    idx_extents = get_face_intervals(n_dim,n_cells)
     nsub = n_cells
     nsub(dir) = nsub(dir) + 1
-    lin_face_idx = idx_extents(dir) - 1 + local2global(local_idx,nsub)
+    lin_face_idx = ( idx_extents(dir) - idx_extents(1) ) + local2global(local_idx,nsub)
   end subroutine local2global_face
 
   pure subroutine global2local_face(n_dim,n_cells,lin_face_idx,dir,local_idx)
@@ -618,16 +756,18 @@ contains
     integer,                   intent(in)  :: lin_face_idx
     integer,                   intent(out) :: dir
     integer, dimension(n_dim), intent(out) :: local_idx
-    integer, dimension(n_dim+1) :: idx_extents
+    integer, dimension(n_dim) :: idx_extents
     integer, dimension(n_dim) :: nsub
+    integer                   :: shifted_lin_idx
     integer, dimension(1) :: loc
-    idx_extents(1) = 1
-    idx_extents(2:n_dim+1) = get_face_intervals(n_dim,n_cells)
-    loc = findloc((lin_face_idx <= idx_extents(2:n_dim+1)),.true.,back=.false.)
+    idx_extents = get_face_intervals(n_dim,n_cells)
+    loc = findloc((lin_face_idx <= idx_extents),.true.)
     dir = loc(1)
+    shifted_lin_idx = lin_face_idx - ( idx_extents(dir) - idx_extents(1) )
     nsub = n_cells
     nsub(dir) = nsub(dir) + 1
-    local_idx = global2local( lin_face_idx-idx_extents(dir)+1,nsub)
+    local_idx = global2local( shifted_lin_idx,nsub)
+    loc(1) = 5
   end subroutine global2local_face
 
   pure subroutine generate_faces(n_dim,n_cells,mult,n_faces,faces)
@@ -652,12 +792,41 @@ contains
     end do
   end subroutine generate_faces
 
-  pure subroutine enumerate_faces(n_dim,n_cells,faces)
+  ! pure subroutine enumerate_faces(n_dim,n_cells,faces)
+  !   integer,                   intent(in) :: n_dim
+  !   integer, dimension(n_dim), intent(in) :: n_cells
+  !   integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
+  !   integer, dimension(n_dim) :: cell_idx, face_sz, face_idx
+  !   integer :: cnt, d, n
+  !   do n = 1,product(n_cells)
+  !     cell_idx = global2local(n,n_cells)
+  !     cnt = 0
+  !     do d = 1,n_dim
+  !       face_sz = n_cells
+  !       face_sz(d) = face_sz(d) + 1
+
+  !       cnt = cnt + 1
+  !       face_idx = cell_idx + 1
+  !       face_idx(d) = face_idx(d) - 1 ! lo face
+  !       faces(cnt,n) = local2global(face_idx,face_sz)
+
+  !       cnt = cnt + 1
+  !       face_idx = cell_idx
+  !       face_idx(d) = face_idx(d) + 1 ! hi face
+  !       faces(cnt,n) = local2global(face_idx,face_sz)
+  !     end do
+  !   end do
+  ! end subroutine enumerate_faces
+
+  pure subroutine enumerate_faces(n_dim,n_cells,n_faces,face_idx,faces)
     integer,                   intent(in) :: n_dim
     integer, dimension(n_dim), intent(in) :: n_cells
+    integer,                     intent(in) :: n_faces
+    integer, dimension(n_faces), intent(in) :: face_idx
     integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
-    integer, dimension(n_dim) :: cell_idx, face_sz, face_idx
-    integer :: cnt, d, n
+    integer, dimension(n_dim) :: cell_idx, face_sz, face_idx_local
+    integer :: cnt, d, n, face_idx_lin
+    integer, dimension(1) :: loc
     do n = 1,product(n_cells)
       cell_idx = global2local(n,n_cells)
       cnt = 0
@@ -666,21 +835,28 @@ contains
         face_sz(d) = face_sz(d) + 1
 
         cnt = cnt + 1
-        face_idx = cell_idx + 1
-        face_idx(d) = face_idx(d) - 1 ! lo face
-        faces(cnt,n) = local2global(face_idx,face_sz)
+        face_idx_local = cell_idx
+        call local2global_face(n_dim,n_cells,d,face_idx_local,face_idx_lin)
+        faces(cnt,n) = face_idx( face_idx_lin )
+        ! loc = findloc(face_idx,face_idx_lin)
+        ! faces(cnt,n) = face_idx( loc(1) )
 
         cnt = cnt + 1
-        face_idx = cell_idx
-        face_idx(d) = face_idx(d) + 1 ! hi face
-        faces(cnt,n) = local2global(face_idx,face_sz)
+        face_idx_local = cell_idx
+        face_idx_local(d) = face_idx_local(d) + 1 ! hi face
+        call local2global_face(n_dim,n_cells,d,face_idx_local,face_idx_lin)
+        faces(cnt,n) = face_idx( face_idx_lin )
+        ! loc = findloc(face_idx,face_idx_lin)
+        ! faces(cnt,n) = face_idx( loc(1) )
       end do
     end do
   end subroutine enumerate_faces
 
-  pure subroutine fetch_faces(n_dim,n_cells,faces,cell_idx,face_idxs)
+  pure subroutine fetch_faces(n_dim,n_cells,n_faces,face_idx_inv,faces,cell_idx,face_idxs)
     integer, intent(in) :: n_dim
     integer, dimension(n_dim), intent(in) :: n_cells
+    integer, intent(in) :: n_faces
+    integer, dimension(n_faces), intent(in) :: face_idx_inv
     integer, dimension(2*n_dim,product(n_cells)), intent(in) :: faces
     integer, dimension(n_dim), intent(in) :: cell_idx
     integer, dimension(n_dim+1,2*n_dim), intent(out) :: face_idxs
@@ -695,7 +871,8 @@ contains
       face_idxs(1,cnt) = dir
       face_sz = n_cells
       face_sz(dir) = face_sz(dir) + 1
-      face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
+      call global2local_face(n_dim,n_cells,face_idx_inv(faces(n,cell_idx_linear)), face_idxs(1,cnt), face_idxs(2:n_dim+1,cnt) )
+      ! face_idxs(2:n_dim+1,cnt) = global2local(faces(n,cell_idx_linear),face_sz)
     end do
   end subroutine fetch_faces
 
@@ -3379,28 +3556,48 @@ end module test_problem
 program main
   use set_precision, only : dp
   use index_conversion, only : z_indexer, get_number_of_faces
-  use index_conversion, only : global2local_face
+  use index_conversion, only : global2local_face, local2global_face
+  use index_conversion, only : enumerate_faces, fetch_faces, global2local
 
   implicit none
 
   type(z_indexer) :: z_ind
-  integer :: i, j, k, n_faces, n_dim, dir
-  integer, dimension(3) :: n_cells, idx
-  integer, dimension(:), allocatable :: face_idx
-  ! integer, dimension(:,:), allocatable :: faces
-  n_dim   = 3
-  n_cells = [5,5,5]
-  n_faces = get_number_of_faces(3,n_cells)
+  integer :: i, d, s, cnt
+  integer :: n_faces, n_dim, dir
+  integer, dimension(3) :: n_cells, cell_idx, offset, local_face_idx
+  integer, dimension(1) :: loc
+  integer, dimension(:,:), allocatable :: face_idx
+  integer, dimension(:,:), allocatable :: faces, cell_faces1, cell_faces2
 
-  allocate(face_idx(n_faces))
-  ! allocate(faces(1+n_dim,n_faces))
+  n_dim   = 2
+  n_cells = [5,5,1]
+  n_faces = get_number_of_faces(n_dim,n_cells)
+
+  allocate(face_idx(n_faces,2))
+  allocate(faces(2*n_dim,product(n_cells)))
+  allocate(cell_faces1(n_dim+1,2*n_dim))
+  allocate(cell_faces2(n_dim+1,2*n_dim))
   z_ind = z_indexer()
 
-  call z_ind%generate_face_idx_order(n_dim,n_cells,face_idx)
+  call z_ind%generate_face_idx_order(n_dim,n_cells,n_faces,face_idx)
+  call enumerate_faces(n_dim,n_cells(1:n_dim),n_faces,face_idx(:,1),faces)
 
-  do i = 1,6
-    call global2local_face(n_dim,n_cells,face_idx(i),dir,idx)
-    write(*,*) face_idx(i), dir, idx
+
+  do i = 1,2
+    cell_idx = global2local(i,n_cells)
+    call fetch_faces(n_dim,n_cells,n_faces,face_idx(:,2),faces,cell_idx,cell_faces2)
+    cnt = 0
+    do d = 1,n_dim
+      do s = 0,1
+        cnt = cnt + 1
+        offset = 0
+        offset(d) = s
+        cell_faces1(1,cnt) = d
+        cell_faces1(2:n_dim+1,cnt) = cell_idx(1:n_dim) + offset(1:n_dim)
+        write(*,*) i, '|', '(', cell_faces1(:,cnt), ')', '|', '(',cell_faces2(:,cnt), ')'
+      end do
+    end do
+    write(*,*)
   end do
   write(*,*) 'Here'
 
