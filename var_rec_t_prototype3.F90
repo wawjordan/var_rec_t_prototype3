@@ -2410,14 +2410,14 @@ contains
     end do
   end subroutine pack_quadrature_info
 
-  subroutine pack_quadrature_info_z_order(gblock,n_quad,n_faces,face_map,quad_wts,quad_pts)
+  subroutine pack_quadrature_info_z_order(gblock,n_dim,n_quad,n_faces,face_map,quad_wts,quad_pts)
     use set_constants,    only : zero
     use index_conversion, only : global2local_face
     type(grid_block), intent(in) :: gblock
     integer,          intent(in) :: n_quad, n_faces
     integer,  dimension(n_faces),          intent(in)  :: face_map
     real(dp), dimension(n_quad,n_faces),   intent(out) :: quad_wts
-    real(dp), dimension(3,n_quad,n_faces), intent(out) :: quad_pts
+    real(dp), dimension(n_dim,n_quad,n_faces), intent(out) :: quad_pts
     integer :: n, d, n_dim
     integer, dimension(3) :: idx, n_cells
     quad_pts = zero
@@ -2428,7 +2428,7 @@ contains
       idx = 1
       call global2local_face( n_dim, n_cells(1:n_dim), face_map(n), d, idx(1:n_dim) )
       quad_wts(:,n)   = gblock%grid_vars%face_quads(d)%p(idx(1),idx(2),idx(3))%quad_wts
-      quad_pts(:,:,n) = gblock%grid_vars%face_quads(d)%p(idx(1),idx(2),idx(3))%quad_pts
+      quad_pts(:,:,n) = gblock%grid_vars%face_quads(d)%p(idx(1),idx(2),idx(3))%quad_pts(1:n_dim,:)
     end do
   end subroutine pack_quadrature_info_z_order
 
@@ -3170,8 +3170,8 @@ contains
     allocate( this%moments(  this%n_terms, this%n_cells ) )
     allocate( this%coefs(  this%n_terms, this%n_vars, this%n_cells ) )
     allocate( this%quad_wts( this%n_quad, this%n_faces ) )
-    ! allocate( this%quad_pts( this%n_dim, this%n_quad, this%n_faces ) )
-    allocate( this%quad_pts( 3, this%n_quad, this%n_faces ) )
+    allocate( this%quad_pts( this%n_dim, this%n_quad, this%n_faces ) )
+    ! allocate( this%quad_pts( 3, this%n_quad, this%n_faces ) )
     this%nbor_idx = 0
     this%face_idx = 0
     this%interior_face_cnt = 0
@@ -3184,7 +3184,7 @@ contains
     call generate_face_idx_z_order(this%n_dim,gblock%n_cells,this%n_faces,this%face_map)
     call generate_cell_idx_z_order(this%n_dim,gblock%n_cells,this%n_cells,this%cell_map)
     ! call pack_quadrature_info(gblock,this%n_quad,this%n_faces,this%quad_wts,this%quad_pts)
-    call pack_quadrature_info_z_order(gblock,this%n_quad, this%n_faces, this%face_map,this%quad_wts,this%quad_pts)
+    call pack_quadrature_info_z_order(gblock,this%n_dim,this%n_quad, this%n_faces, this%face_map,this%quad_wts,this%quad_pts)
     do i = 1,this%n_cells
       cell_idx = global2local(this%cell_map(i,1),gblock%n_cells(1:this%n_dim))
       tmp_idx = 1
