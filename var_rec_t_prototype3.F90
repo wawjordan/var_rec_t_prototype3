@@ -451,6 +451,9 @@ module index_conversion
   public :: global2local_face, local2global_face
   public :: z_indexer
   public :: generate_faces
+  public :: generate_face_idx_z_order
+  public :: generate_cell_idx_z_order
+  public :: get_cell_face_nbors
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -462,8 +465,8 @@ module index_conversion
     integer(kind=8), dimension (0:1023) :: morton_table
   contains
     private
-    procedure, public, pass :: pos_to_z, pos_to_z_alt
-    procedure, public, pass :: generate_face_idx_order
+    procedure, public, pass :: pos_to_z
+    
   end type z_indexer
 
   interface z_indexer
@@ -482,30 +485,6 @@ contains
         this%morton_table(v) = z
     end do
   end function constructor
-
-  pure elemental function pos_to_z_alt( this, i, j, k) result(z)
-    use set_precision, only : i8
-    class(z_indexer), intent(in) :: this
-    integer, intent(in) :: i, j, k
-    integer(i8) :: z
-    integer(i8) :: b, ii, jj, kk
-    ii = i-1
-    jj = j-1
-    kk = k-1
-
-    z = 0
-    do b=0, 19
-      ! call mvbits(kk,b,1,z,3*b+2)
-      ! call mvbits(ii,b,1,z,3*b+1)
-      ! call mvbits(jj,b,1,z,3*b  )
-      call mvbits(ii,b,1,z,3*b+2)
-      call mvbits(jj,b,1,z,3*b+1)
-      call mvbits(kk,b,1,z,3*b  )
-    end do
-
-    z = z+1
-
-  end function pos_to_z_alt
 
   pure elemental function pos_to_z( this, i, j, k) result(z)
     use set_precision, only : i8
@@ -532,41 +511,50 @@ contains
     z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
     z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),32) + 1
 
-    ! z =           this%morton_table(iand(      kk,      sz))
-    ! z = z + ishft(this%morton_table(iand(      jj,      sz)),1)
-    ! z = z + ishft(this%morton_table(iand(      ii,      sz)),2)
-    ! z = z + ishft(this%morton_table(iand(ishft(ii,-10), sz)),30)
-    ! z = z + ishft(this%morton_table(iand(ishft(jj,-10), sz)),31)
-    ! z = z + ishft(this%morton_table(iand(ishft(kk,-10), sz)),32) + 1
-
   end function pos_to_z
 
-  subroutine generate_face_idx_order(this,n_dim,n_cells,n_faces,face_idx)
+  pure elemental function pos_to_z_alt( i, j, k ) result(z)
+    use set_precision, only : i8
+    integer, intent(in) :: i, j, k
+    integer(i8) :: z
+    integer(i8) :: b, ii, jj, kk
+    ii = i-1
+    jj = j-1
+    kk = k-1
+
+    z = 0
+    do b=0, 19
+      call mvbits(kk,b,1,z,3*b+2)
+      call mvbits(ii,b,1,z,3*b+1)
+      call mvbits(jj,b,1,z,3*b  )
+      ! call mvbits(ii,b,1,z,3*b+2)
+      ! call mvbits(jj,b,1,z,3*b+1)
+      ! call mvbits(kk,b,1,z,3*b  )
+    end do
+
+    z = z+1
+
+  end function pos_to_z_alt
+
+  subroutine generate_face_idx_z_order(n_dim,n_cells,n_faces,face_map)
     use set_precision, only : i8
     use quick_sort, only : qsort_i8_1D
-    use sort_unique, only : count_unique
-    class(z_indexer),      intent(in) :: this
     integer,               intent(in) :: n_dim
     integer, dimension(3), intent(in) :: n_cells
     integer,               intent(in) :: n_faces
-    integer, dimension(n_faces,2), intent(out) :: face_idx
+    integer, dimension(n_faces,2), intent(out) :: face_map
     integer(i8), dimension(n_faces) :: indx1, indx2
     integer, dimension(3) :: sz_tmp
     integer :: i, j, k, cnt, tmp1, tmp2
     sz_tmp = n_cells
     sz_tmp(1:n_dim) = 2*n_cells(1:n_dim)
 
-    ! do i = 1,n_faces
-    !   call global2local_face(n_dim,n_cells,i,dir,local_idx)
-    !   indx2(i) = this%pos_to_z_alt(local_idx(1),local_idx(2),local_idx(3))
-    ! end do
-
     cnt = 0
     do k = 2,sz_tmp(3),2
       do j = 2,sz_tmp(2),2
         do i = 1,sz_tmp(1)+1,2
           cnt = cnt + 1
-          indx2(cnt) = this%pos_to_z_alt(i,j,k)
+          indx2(cnt) = pos_to_z_alt(i,j,k)
         end do
       end do
     end do
@@ -575,7 +563,7 @@ contains
       do j = 1,sz_tmp(2)+1,2
         do i = 2,sz_tmp(1),2
           cnt = cnt + 1
-          indx2(cnt) = this%pos_to_z_alt(i,j,k)
+          indx2(cnt) = pos_to_z_alt(i,j,k)
         end do
       end do
     end do
@@ -585,7 +573,7 @@ contains
         do j = 2,sz_tmp(2),2
           do i = 2,sz_tmp(1),2
             cnt = cnt + 1
-            indx2(cnt) = this%pos_to_z_alt(i,j,k)
+            indx2(cnt) = pos_to_z_alt(i,j,k)
           end do
         end do
       end do
@@ -593,12 +581,41 @@ contains
 
     indx1 = [(i,i=1,n_faces)]
     call qsort_i8_1D(int(n_faces,i8),indx2,indx1)
-    face_idx(:,1) = int(indx1)
+    face_map(:,1) = int(indx1)
 
     indx2 = [(i,i=1,n_faces)]
     call qsort_i8_1D(int(n_faces,i8),indx1,indx2)
-    face_idx(:,2) = int(indx2)
-  end subroutine generate_face_idx_order
+    face_map(:,2) = int(indx2)
+  end subroutine generate_face_idx_z_order
+
+  subroutine generate_cell_idx_z_order(n_dim,n_cells,n_cells_lin,cell_map)
+    use set_precision, only : i8
+    use quick_sort, only : qsort_i8_1D
+    integer,               intent(in) :: n_dim
+    integer, dimension(3), intent(in) :: n_cells
+    integer,               intent(in) :: n_cells_lin
+    integer, dimension(n_cells_lin,2), intent(out) :: cell_map
+    integer(i8), dimension(product(n_cells)) :: indx1, indx2
+    integer :: i, j, k, cnt
+
+    cnt = 0
+    do k = 1,n_cells(3)
+      do j = 1,n_cells(2)
+        do i = 1,n_cells(1)
+          cnt = cnt + 1
+          indx2(cnt) = pos_to_z_alt(i,j,k)
+        end do
+      end do
+    end do
+
+    indx1 = [(i,i=1,n_cells_lin)]
+    call qsort_i8_1D(int(n_cells_lin,i8),indx2,indx1)
+    cell_map(:,1) = int(indx1)
+
+    indx2 = [(i,i=1,n_cells_lin)]
+    call qsort_i8_1D(int(n_cells_lin,i8),indx1,indx2)
+    cell_map(:,2) = int(indx2)
+  end subroutine generate_cell_idx_z_order
 
   subroutine remove_duplicates_unsorted(input,output,n_unique)
     integer, dimension(:),           intent(in)  :: input
@@ -767,7 +784,6 @@ contains
     nsub = n_cells
     nsub(dir) = nsub(dir) + 1
     local_idx = global2local( shifted_lin_idx,nsub)
-    loc(1) = 5
   end subroutine global2local_face
 
   pure subroutine generate_faces(n_dim,n_cells,mult,n_faces,faces)
@@ -826,7 +842,6 @@ contains
     integer, dimension(2*n_dim,product(n_cells)), intent(out) :: faces
     integer, dimension(n_dim) :: cell_idx, face_sz, face_idx_local
     integer :: cnt, d, n, face_idx_lin
-    integer, dimension(1) :: loc
     do n = 1,product(n_cells)
       cell_idx = global2local(n,n_cells)
       cnt = 0
@@ -835,22 +850,55 @@ contains
         face_sz(d) = face_sz(d) + 1
 
         cnt = cnt + 1
-        face_idx_local = cell_idx
+        face_idx_local = cell_idx ! lo face
         call local2global_face(n_dim,n_cells,d,face_idx_local,face_idx_lin)
         faces(cnt,n) = face_idx( face_idx_lin )
-        ! loc = findloc(face_idx,face_idx_lin)
-        ! faces(cnt,n) = face_idx( loc(1) )
 
         cnt = cnt + 1
         face_idx_local = cell_idx
         face_idx_local(d) = face_idx_local(d) + 1 ! hi face
         call local2global_face(n_dim,n_cells,d,face_idx_local,face_idx_lin)
         faces(cnt,n) = face_idx( face_idx_lin )
-        ! loc = findloc(face_idx,face_idx_lin)
-        ! faces(cnt,n) = face_idx( loc(1) )
       end do
     end do
   end subroutine enumerate_faces
+
+  pure subroutine get_cell_face_nbors( n_dim, n_faces, n_cells_lin, face_map_inv, cell_map_inv, n_cells, cell_idx, nbor_idx, face_idx, n_int )
+    integer,                     intent(in) :: n_dim, n_faces, n_cells_lin
+    integer, dimension(n_faces), intent(in) :: face_map_inv
+    integer, dimension(n_cells_lin), intent(in) :: cell_map_inv
+    integer, dimension(n_dim),   intent(in) :: n_cells, cell_idx
+    integer, dimension(2*n_dim), intent(out) :: nbor_idx, face_idx
+    integer,                     intent(out) :: n_int
+
+    integer, dimension(n_dim) :: idx, lo, hi
+    integer :: s, d, n_ext, cnt, tmp_idx
+    cnt   = 0
+    n_int = 0
+    n_ext = 0
+    lo = 1
+    hi = n_cells
+    do d = 1,n_dim
+      do s = 0,1
+        cnt = cnt + 1
+        idx = cell_idx
+        idx(d) = idx(d) + 2*s - 1
+        if ( in_bound(n_dim,idx,lo,hi) ) then
+            n_int = n_int + 1
+            nbor_idx(n_int) = local2global(idx,n_cells)
+            idx(d) = idx(d) - s + 1
+            call local2global_face( n_dim, n_cells, d, idx, tmp_idx )
+            face_idx(n_int) = face_map_inv(tmp_idx)
+        else
+          nbor_idx(2*n_dim - n_ext) = local2global(cell_idx,n_cells)
+          idx(d) = idx(d) - s + 1
+          call local2global_face( n_dim, n_cells, d, idx, tmp_idx )
+          face_idx(2*n_dim - n_ext) = face_map_inv(tmp_idx)
+          n_ext = n_ext + 1
+        end if
+      end do
+    end do
+  end subroutine get_cell_face_nbors
 
   pure subroutine fetch_faces(n_dim,n_cells,n_faces,face_idx_inv,faces,cell_idx,face_idxs)
     integer, intent(in) :: n_dim
@@ -2281,7 +2329,7 @@ module grid_derived_type
 
   public :: pack_cell_node_coords
   public :: get_face_quad_ptrs
-  public :: pack_quadrature_info
+  public :: pack_quadrature_info, pack_quadrature_info_z_order
 
   type derived_grid_vars
     real(dp),       allocatable, dimension(:,:,:,:) :: cell_c
@@ -2361,6 +2409,28 @@ contains
       end do
     end do
   end subroutine pack_quadrature_info
+
+  subroutine pack_quadrature_info_z_order(gblock,n_quad,n_faces,face_map,quad_wts,quad_pts)
+    use set_constants,    only : zero
+    use index_conversion, only : global2local_face
+    type(grid_block), intent(in) :: gblock
+    integer,          intent(in) :: n_quad, n_faces
+    integer,  dimension(n_faces),          intent(in)  :: face_map
+    real(dp), dimension(n_quad,n_faces),   intent(out) :: quad_wts
+    real(dp), dimension(3,n_quad,n_faces), intent(out) :: quad_pts
+    integer :: n, d, n_dim
+    integer, dimension(3) :: idx, n_cells
+    quad_pts = zero
+    quad_wts = zero
+    n_dim = gblock%n_dim
+    n_cells = gblock%n_cells
+    do n = 1,n_faces
+      idx = 1
+      call global2local_face( n_dim, n_cells(1:n_dim), face_map(n), d, idx(1:n_dim) )
+      quad_wts(:,n)   = gblock%grid_vars%face_quads(d)%p(idx(1),idx(2),idx(3))%quad_wts
+      quad_pts(:,:,n) = gblock%grid_vars%face_quads(d)%p(idx(1),idx(2),idx(3))%quad_pts
+    end do
+  end subroutine pack_quadrature_info_z_order
 
   pure function pack_cell_node_coords(idx,bnd_min,bnd_max,coords_in) result(coords_out)
   integer, dimension(3),                            intent(in)  :: idx, bnd_min, bnd_max
@@ -3023,6 +3093,7 @@ module var_rec_derived_type
     integer :: self_block
     integer :: n_vars, n_quad
     integer :: n_cells, n_faces
+    integer,  dimension(:,:),     allocatable :: face_map, cell_map
     integer,  dimension(:),       allocatable :: interior_face_cnt
     integer,  dimension(:,:),     allocatable :: nbor_idx, face_idx
     real(dp), dimension(:,:),     allocatable :: x_ref, h_ref
@@ -3060,12 +3131,12 @@ contains
   function constructor( gblock, n_vars, mono_basis ) result(this)
     use set_constants, only : zero
     use math,             only : maximal_extents
-    use index_conversion, only : get_number_of_faces, global2local
-    use grid_derived_type, only : grid_block, pack_cell_node_coords, pack_quadrature_info
-    type(grid_block), intent(in) :: gblock
-    integer,          intent(in) :: n_vars
+    use index_conversion, only : get_number_of_faces, global2local, generate_face_idx_z_order, generate_cell_idx_z_order
+    use grid_derived_type, only : grid_block, pack_cell_node_coords, pack_quadrature_info, pack_quadrature_info_z_order
+    type(grid_block),       intent(in) :: gblock
+    integer,                intent(in) :: n_vars
     type(monomial_basis_t), intent(in) :: mono_basis
-    type(var_rec_t), target :: this
+    type(var_rec_t)                    :: this
     integer :: i, n
     integer :: n_quad_volume
     integer, dimension(gblock%n_dim) :: cell_idx
@@ -3089,6 +3160,8 @@ contains
     allocate(t_quad_pts(this%n_dim,n_quad_volume))
     t_quad_pts = zero
 
+    allocate( this%face_map(this%n_faces,2) )
+    allocate( this%cell_map(this%n_cells,2) )
     allocate( this%nbor_idx( 2*this%n_dim, this%n_cells ) )
     allocate( this%face_idx( 2*this%n_dim, this%n_cells ) )
     allocate( this%interior_face_cnt(  this%n_cells ) )
@@ -3097,7 +3170,8 @@ contains
     allocate( this%moments(  this%n_terms, this%n_cells ) )
     allocate( this%coefs(  this%n_terms, this%n_vars, this%n_cells ) )
     allocate( this%quad_wts( this%n_quad, this%n_faces ) )
-    allocate( this%quad_pts( this%n_dim, this%n_quad, this%n_faces ) )
+    ! allocate( this%quad_pts( this%n_dim, this%n_quad, this%n_faces ) )
+    allocate( this%quad_pts( 3, this%n_quad, this%n_faces ) )
     this%nbor_idx = 0
     this%face_idx = 0
     this%interior_face_cnt = 0
@@ -3107,9 +3181,12 @@ contains
     this%quad_wts = zero
     this%quad_pts = zero
 
-    call pack_quadrature_info(gblock,this%n_quad,this%n_faces,this%quad_wts,this%quad_pts)
+    call generate_face_idx_z_order(this%n_dim,gblock%n_cells,this%n_faces,this%face_map)
+    call generate_cell_idx_z_order(this%n_dim,gblock%n_cells,this%n_cells,this%cell_map)
+    ! call pack_quadrature_info(gblock,this%n_quad,this%n_faces,this%quad_wts,this%quad_pts)
+    call pack_quadrature_info_z_order(gblock,this%n_quad, this%n_faces, this%face_map,this%quad_wts,this%quad_pts)
     do i = 1,this%n_cells
-      cell_idx = global2local(i,gblock%n_cells)
+      cell_idx = global2local(this%cell_map(i,1),gblock%n_cells(1:this%n_dim))
       tmp_idx = 1
       tmp_idx(1:this%n_dim) = cell_idx
       nodes = pack_cell_node_coords(tmp_idx,[1,1,1],gblock%n_nodes,gblock%node_coords)
@@ -3125,6 +3202,8 @@ contains
 
   pure elemental subroutine destroy_var_rec_t( this )
     class(var_rec_t), intent(inout) :: this
+    if (allocated(this%face_map) ) deallocate( this%face_map )
+    if (allocated(this%cell_map) ) deallocate( this%cell_map )
     if (allocated(this%nbor_idx) ) deallocate( this%nbor_idx )
     if (allocated(this%face_idx) ) deallocate( this%face_idx )
     if (allocated(this%interior_face_cnt) ) deallocate( this%interior_face_cnt )
@@ -3524,83 +3603,113 @@ contains
 
 end module test_problem
 
-! program main
-!   use set_precision, only : dp
-!   use set_constants, only : zero, one
-!   use test_problem,  only : setup_grid_and_rec
-!   use grid_derived_type, only : grid_type
-!   use var_rec_derived_type, only : var_rec_t
-!   use timer_derived_type, only : basic_timer_t
-
-!   implicit none
-
-!   type(grid_type) :: grid
-!   type(var_rec_t) :: rec
-!   type(basic_timer_t) :: timer
-!   integer :: degree, n_vars, n_dim
-!   integer, dimension(3) :: n_nodes, n_ghost
-
-!   degree  = 1
-!   n_vars  = 1
-!   n_dim   = 3
-!   n_nodes = [11,11,11]
-!   n_ghost = [2,2,2]
-!   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
-
-!   write(*,*) 'Here'
-!   call rec%destroy()
-!   call grid%destroy()
-! end program main
-
-
 program main
   use set_precision, only : dp
-  use index_conversion, only : z_indexer, get_number_of_faces
-  use index_conversion, only : global2local_face, local2global_face
-  use index_conversion, only : enumerate_faces, fetch_faces, global2local
+  use set_constants, only : zero, one
+  use test_problem,  only : setup_grid_and_rec
+  use grid_derived_type, only : grid_type
+  use var_rec_derived_type, only : var_rec_t
+  use timer_derived_type, only : basic_timer_t
 
   implicit none
 
-  type(z_indexer) :: z_ind
-  integer :: i, d, s, cnt
-  integer :: n_faces, n_dim, dir
-  integer, dimension(3) :: n_cells, cell_idx, offset, local_face_idx
-  integer, dimension(1) :: loc
-  integer, dimension(:,:), allocatable :: face_idx
-  integer, dimension(:,:), allocatable :: faces, cell_faces1, cell_faces2
+  type(grid_type) :: grid
+  type(var_rec_t) :: rec
+  type(basic_timer_t) :: timer
+  integer :: degree, n_vars, n_dim
+  integer, dimension(3) :: n_nodes, n_ghost
 
+  degree  = 1
+  n_vars  = 1
   n_dim   = 2
-  n_cells = [5,5,1]
-  n_faces = get_number_of_faces(n_dim,n_cells)
+  n_nodes = [11,11,2]
+  n_ghost = [0,0,0]
+  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
 
-  allocate(face_idx(n_faces,2))
-  allocate(faces(2*n_dim,product(n_cells)))
-  allocate(cell_faces1(n_dim+1,2*n_dim))
-  allocate(cell_faces2(n_dim+1,2*n_dim))
-  z_ind = z_indexer()
-
-  call z_ind%generate_face_idx_order(n_dim,n_cells,n_faces,face_idx)
-  call enumerate_faces(n_dim,n_cells(1:n_dim),n_faces,face_idx(:,1),faces)
-
-
-  do i = 1,2
-    cell_idx = global2local(i,n_cells)
-    call fetch_faces(n_dim,n_cells,n_faces,face_idx(:,2),faces,cell_idx,cell_faces2)
-    cnt = 0
-    do d = 1,n_dim
-      do s = 0,1
-        cnt = cnt + 1
-        offset = 0
-        offset(d) = s
-        cell_faces1(1,cnt) = d
-        cell_faces1(2:n_dim+1,cnt) = cell_idx(1:n_dim) + offset(1:n_dim)
-        write(*,*) i, '|', '(', cell_faces1(:,cnt), ')', '|', '(',cell_faces2(:,cnt), ')'
-      end do
-    end do
-    write(*,*)
-  end do
   write(*,*) 'Here'
-
-  deallocate(face_idx)
-
+  call rec%destroy()
+  call grid%destroy()
 end program main
+
+
+! program main
+!   use set_precision, only : dp
+!   use index_conversion, only : generate_face_idx_z_order, generate_cell_idx_z_order
+!   use index_conversion, only : get_cell_face_nbors
+!   use index_conversion, only : get_number_of_faces
+!   use index_conversion, only : global2local_face, local2global_face
+!   use index_conversion, only : enumerate_faces, fetch_faces, global2local
+
+!   implicit none
+
+!   integer :: i, j, d, s, cnt, n_int
+!   integer :: n_faces, n_cells_lin, n_dim, dir
+!   integer, dimension(3) :: n_cells, cell_idx, offset, local_face_idx
+!   integer, dimension(1) :: loc
+!   integer, dimension(:,:), allocatable :: face_map, cell_map
+!   integer, dimension(:),   allocatable :: nbor_idx, face_idx
+!   integer, dimension(:,:), allocatable :: faces, cell_faces1, cell_faces2
+
+!   n_dim   = 2
+!   n_cells = [5,5,1]
+!   n_cells_lin = product(n_cells)
+!   n_faces = get_number_of_faces(n_dim,n_cells)
+
+!   allocate(face_map(n_faces,2))
+!   allocate(cell_map(n_cells_lin,2))
+!   allocate(faces(2*n_dim,n_cells_lin))
+!   allocate(cell_faces1(n_dim+1,2*n_dim))
+!   allocate(cell_faces2(n_dim+1,2*n_dim))
+
+!   allocate(nbor_idx(2*n_dim))
+!   allocate(face_idx(2*n_dim))
+
+!   call generate_face_idx_z_order(n_dim,n_cells,n_faces,face_map)
+!   call generate_cell_idx_z_order(n_dim,n_cells,n_cells_lin,cell_map)
+!   call enumerate_faces(n_dim,n_cells(1:n_dim),n_faces,face_map(:,1),faces)
+
+!   do i = 1,2
+!     cell_idx = global2local(i,n_cells)
+!     call get_cell_face_nbors(n_dim,n_faces,n_cells_lin,face_map(:,2),cell_map(:,2),n_cells,cell_idx,nbor_idx,face_idx,n_int)
+!     do j = 1,2*n_dim
+!       call global2local_face(n_dim,n_cells,face_map(face_idx(j),1),cell_faces2(1,j),cell_faces2(2:n_dim+1,j))
+!     end do
+!     call fetch_faces(n_dim,n_cells,n_faces,face_map(:,2),faces,cell_idx,cell_faces1)
+!     cnt = 0
+!     do d = 1,n_dim
+!       do s = 0,1
+!         cnt = cnt + 1
+!         offset = 0
+!         offset(d) = s
+!         cell_faces1(1,cnt) = d
+!         cell_faces1(2:n_dim+1,cnt) = cell_idx(1:n_dim) + offset(1:n_dim)
+!         write(*,*) i, '|', '(', cell_faces1(:,cnt), ')', '|', '(',cell_faces2(:,cnt), ')'
+!       end do
+!     end do
+!     write(*,*)
+!   end do
+!   write(*,*) 'Here'
+
+!   ! do i = 1,2
+!   !   cell_idx = global2local(i,n_cells)
+!   !   call fetch_faces(n_dim,n_cells,n_faces,face_map(:,2),faces,cell_idx,cell_faces2)
+!   !   cnt = 0
+!   !   do d = 1,n_dim
+!   !     do s = 0,1
+!   !       cnt = cnt + 1
+!   !       offset = 0
+!   !       offset(d) = s
+!   !       cell_faces1(1,cnt) = d
+!   !       cell_faces1(2:n_dim+1,cnt) = cell_idx(1:n_dim) + offset(1:n_dim)
+!   !       write(*,*) i, '|', '(', cell_faces1(:,cnt), ')', '|', '(',cell_faces2(:,cnt), ')'
+!   !     end do
+!   !   end do
+!   !   write(*,*)
+!   ! end do
+!   ! write(*,*) 'Here'
+
+!   deallocate(face_map, cell_map, faces)
+!   deallocate(nbor_idx,face_idx)
+!   deallocate(cell_faces1, cell_faces2)
+
+! end program main
