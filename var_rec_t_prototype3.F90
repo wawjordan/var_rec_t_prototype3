@@ -3132,17 +3132,20 @@ contains
     use set_constants, only : zero
     use math,             only : maximal_extents
     use index_conversion, only : get_number_of_faces, global2local, generate_face_idx_z_order, generate_cell_idx_z_order
+    use index_conversion, only : get_cell_face_nbors, global2local_face
     use grid_derived_type, only : grid_block, pack_cell_node_coords, pack_quadrature_info, pack_quadrature_info_z_order
     type(grid_block),       intent(in) :: gblock
     integer,                intent(in) :: n_vars
     type(monomial_basis_t), intent(in) :: mono_basis
     type(var_rec_t)                    :: this
-    integer :: i, n
+    integer :: i
     integer :: n_quad_volume
     integer, dimension(gblock%n_dim) :: cell_idx
     integer, dimension(3) :: tmp_idx
     real(dp), dimension(3,8) :: nodes
     real(dp), dimension(:,:), allocatable :: t_quad_pts
+    integer :: d, j
+    integer, dimension(gblock%n_dim) :: face_idx
     call this%destroy()
     this%total_degree = mono_basis%total_degree
     this%n_dim        = mono_basis%n_dim
@@ -3196,7 +3199,13 @@ contains
         t_quad_pts = transform_points(this%n_dim,n_quad_volume,quad%quad_pts,this%x_ref(:,i),this%h_ref(:,i))
         this%moments(:,i) = compute_grid_moments(gblock%n_dim,this%n_terms,n_quad_volume,this%exponents,t_quad_pts,quad%quad_wts)
       end associate
-      ! get neighbors, get idxs, copy over quadrature points
+      call get_cell_face_nbors( this%n_dim, this%n_faces, this%n_cells, this%face_map(:,2), this%cell_map(:,2), gblock%n_cells, cell_idx, this%nbor_idx(:,i), this%face_idx(:,i), this%interior_face_cnt(i) )
+      write(*,'(I0,A,I0,A,I0,A,I0,A,I0)') i, ', (', cell_idx(1), ',', cell_idx(2), '), ',this%cell_map(i,1), ', ', this%cell_map(i,2)
+      do j = 1,this%interior_face_cnt(i)
+        call global2local_face( this%n_dim, gblock%n_cells, this%face_map( this%face_idx(j,i), 1 ), d, face_idx )
+        write(*,'(A,I0,A,I0,A,I0,A)') '  ', j, ', (', face_idx(1), ',', face_idx(2), ')'
+      end do
+      write(*,*)
     end do
   end function constructor
 
